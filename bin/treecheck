@@ -39,8 +39,8 @@ OPTIONS:
 
 EXIT STATUS:
   0   clean
-  1   mismatches or I/O errors, meaning a real integrity problem
-  2   nothing corrupt, but some files have no sidecar yet
+  1   verification failed: a mismatch, an I/O error, or a failed walk
+  2   nothing corrupt, but some files have no usable sidecar yet
 
 EXAMPLES:
   treecheck /Volumes/Media                   Verify the whole tree
@@ -166,6 +166,10 @@ create_file_hash() {
         fi
         echo -n "Verification: "
         current_hash=$(compute_hash "$file")
+        if [ -z "$current_hash" ]; then
+            echo "unreadable!"
+            return 3
+        fi
         if [ "$stored_hash" = "$current_hash" ]; then
             echo "✓"
             return 0
