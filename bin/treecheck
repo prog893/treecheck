@@ -20,9 +20,11 @@ Usage: nvme-integrity-checker.sh [OPTIONS] <directory>
 OPTIONS:
 -c Create hashes + verify existing (default: verify only)
 -f Force overwrite existing hashes
--r Recursive
+-r Accepted for compatibility; recursion is already the default
 -e Exclude dirs (comma-separated)
 -n No verify (create only)
+--no-recurse Only the named directory, do not descend
+--max-depth N Descend at most N levels
 -v Verbose (show skipped files)
 -h Help
 
@@ -148,14 +150,14 @@ fi
 find_expr+=(-print0)
 
 # If recursive is disabled, add maxdepth
-[ $RECURSIVE -eq 0 ] && find_expr=(-maxdepth 1 "${find_expr[@]}")
+[ -n "$MAXDEPTH" ] && find_expr=(-maxdepth "$MAXDEPTH" "${find_expr[@]}")
 
 # Count total files first (for verbose output of skipped files)
 if [ $VERBOSE -eq 1 ]; then
     local all_files=0
     while IFS= read -r -d '' file; do
         ((all_files++))
-    done < <(find "$TARGET_DIR" -maxdepth 1 -type f -print0 2>/dev/null)
+    done < <(find "$TARGET_DIR" ${MAXDEPTH:+-maxdepth "$MAXDEPTH"} -type f -print0 2>/dev/null)
 fi
 
 # Process files
@@ -197,12 +199,14 @@ echo -e "\nSummary: $total files, $processed $([ "$mode" = "create" ] && echo "c
 }
 
 # Parse arguments
-MODE="" RECURSIVE=0 TARGET_DIR=""
+MODE="" MAXDEPTH="" TARGET_DIR=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --create) MODE="create"; shift ;;
         --force) FORCE=1; shift ;;
-        --recursive) RECURSIVE=1; shift ;;
+        --recursive) shift ;;
+        --no-recurse) MAXDEPTH=1; shift ;;
+        --max-depth) MAXDEPTH="$2"; shift 2 ;;
         --no-verify) NO_VERIFY=1; shift ;;
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
@@ -212,7 +216,7 @@ while [[ $# -gt 0 ]]; do
             case ${1:$i:1} in
                 c) MODE="create" ;;
                 f) FORCE=1 ;;
-                r) RECURSIVE=1 ;;
+                r) ;;
                 n) NO_VERIFY=1 ;;
                 v) VERBOSE=1 ;;
                 *) error "Unknown: -${1:$i:1}"; usage ;;
@@ -236,14 +240,16 @@ if [ "$MODE" = "verify" ] && [ $NO_VERIFY -eq 1 ]; then
     exit 0
 fi
 
+if [ -z "$MAXDEPTH" ]; then SCOPE_DESC="Depth: unlimited"; else SCOPE_DESC="Depth: $MAXDEPTH"; fi
+
 if [ "$MODE" = "create" ]; then
     if [ $NO_VERIFY -eq 1 ]; then
-        echo "Mode: Create only | Dir: $TARGET_DIR | Recursive: $([ $RECURSIVE -eq 1 ] && echo "Yes" || echo "No")"
+        echo "Mode: Create only | Dir: $TARGET_DIR | $SCOPE_DESC"
     else
-        echo "Mode: Create + Verify | Dir: $TARGET_DIR | Recursive: $([ $RECURSIVE -eq 1 ] && echo "Yes" || echo "No")"
+        echo "Mode: Create + Verify | Dir: $TARGET_DIR | $SCOPE_DESC"
     fi
 else
-    echo "Mode: Verify only | Dir: $TARGET_DIR | Recursive: $([ $RECURSIVE -eq 1 ] && echo "Yes" || echo "No")"
+    echo "Mode: Verify only | Dir: $TARGET_DIR | $SCOPE_DESC"
 fi
 [ ${#EXCLUDE_DIRS[@]:-} -gt 0 ] && echo "Excluding: ${EXCLUDE_DIRS[*]}"
     echo
