@@ -50,7 +50,7 @@ EXAMPLES:
   treecheck -e "temp,cache" /Volumes/Media   Skip those directories
   treecheck --strict /Volumes/Media          Missing sidecars are failures too
 EOF
-    exit 1
+    exit "${1:-1}"
 }
 
 error() { echo -e "${RED}ERROR: $@${NC}" >&2; }
@@ -310,7 +310,7 @@ while [[ $# -gt 0 ]]; do
         --no-verify) NO_VERIFY=1; shift ;;
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
-        -h|--help) usage ;;
+        -h|--help) usage 0 ;;
     -*)
         for (( i=1; i<${#1}; i++ )); do
             case ${1:$i:1} in
