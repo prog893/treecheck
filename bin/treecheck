@@ -3,11 +3,14 @@
 # NVMe integrity checker - creates/verifies SHA-256 sidecar files
 set -euo pipefail
 
+VERSION="1.0.0"
+
 # Config
 HASH_EXT=".sha256"
 VERBOSE=0
 FORCE=0
 NO_VERIFY=0
+STRICT=0
 EXCLUDE_DIRS=()
 
 # Colors
@@ -15,52 +18,85 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 usage() {
     cat << 'EOF'
-Usage: nvme-integrity-checker.sh [OPTIONS] <directory>
+Usage: treecheck [OPTIONS] <directory>
+
+Walks <directory> and checks every file against its .sha256 sidecar,
+reporting anything whose contents no longer match. Recursive by default.
+Never modifies, moves or deletes your data.
 
 OPTIONS:
--c Create hashes + verify existing (default: verify only)
--f Force overwrite existing hashes
--r Recursive
--e Exclude dirs (comma-separated)
--n No verify (create only)
--v Verbose (show skipped files)
--h Help
+  -c              Create missing sidecars, and verify the ones that exist
+  -f              Overwrite existing sidecars (use with -c)
+  -n              Skip verification (create only; requires -c)
+  -e DIRS         Exclude directories, comma-separated
+  -v              Verbose (report skipped files)
+  -r, --recursive Accepted for compatibility; recursion is already the default
+  --no-recurse    Only the named directory (same as --max-depth 1)
+  --max-depth N   Descend at most N levels
+  --strict        Treat missing sidecars as a failure too
+  -V, --version   Print version and exit
+  -h              Show this help
+
+EXIT STATUS:
+  0   clean
+  1   verification failed: a mismatch, an I/O error, or a failed walk
+  2   nothing corrupt, but some files have no usable sidecar yet
 
 EXAMPLES:
-script.sh /data # Verify only
-script.sh -c /data # Create + verify
-script.sh -cn /data # Create only
-script.sh -cr -e "temp,logs" /data # Create + verify, exclude dirs
+  treecheck /Volumes/Media                   Verify the whole tree
+  treecheck -c /Volumes/Media                Create missing sidecars, verify rest
+  treecheck -cn /Volumes/Media               Create only, skip verification
+  treecheck --no-recurse /Volumes/Media      Top level only
+  treecheck -e "temp,cache" /Volumes/Media   Skip those directories
+  treecheck --strict /Volumes/Media          Missing sidecars are failures too
 EOF
-    exit 1
+    exit "${1:-1}"
 }
 
 error() { echo -e "${RED}ERROR: $@${NC}" >&2; }
+
+FILE_LIST="" FIND_ERR=""
+cleanup_tmp() {
+    [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST"
+    [ -n "$FIND_ERR" ] && rm -f "$FIND_ERR" "$FIND_ERR.all"
+    return 0
+}
+trap cleanup_tmp EXIT
 success() { echo -e "${GREEN}✓ $@${NC}"; }
 
+# Prints the hash on success. Returns non-zero if the file could not be read,
+# which a pipeline into awk would otherwise hide.
 compute_hash() {
-    local file="$1"
-    shasum -a 256 "$file" | awk '{print $1}'
+    local file="$1" out
+    out=$(shasum -a 256 "$file" 2>/dev/null) || return 1
+    printf '%s' "${out%% *}"
 }
 
-# Returns status code and message
+# Status: 0 verified, 1 mismatch, 2 no usable sidecar, 3 I/O error
 verify_file_hash() {
     local file="$1" hash_file="${file}${HASH_EXT}"
     local stored_hash current_hash
 
     if [ ! -f "$hash_file" ]; then
         echo "no sidecar!"
-        return 1
+        return 2
     fi
 
-    stored_hash=$(cat "$hash_file" 2>/dev/null | tr -d '[:space:]')
+    if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
+        echo "sidecar unreadable!"
+        return 3
+    fi
     [ -z "$stored_hash" ] && {
-        echo "EMPTY SIDECAR: $file"
-        return 1
+        echo "empty sidecar!"
+        return 2
     }
 
-    current_hash=$(compute_hash "$file")
     echo -n "sidecar found, computing hash.... "
+    current_hash=$(compute_hash "$file")
+    if [ -z "$current_hash" ]; then
+        echo "unreadable!"
+        return 3
+    fi
 
     if [ "$stored_hash" = "$current_hash" ]; then
         echo "✓"
@@ -78,12 +114,20 @@ create_file_hash() {
 
     # If hash exists and not forced, only verify if not empty
     if [ -f "$hash_file" ] && [ $FORCE -eq 0 ]; then
-        local stored_hash=$(cat "$hash_file" 2>/dev/null | tr -d '[:space:]')
+        local stored_hash
+        if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
+            echo "sidecar unreadable!"
+            return 3
+        fi
         if [ -n "$stored_hash" ]; then
             # Verify existing hash unless NO_VERIFY is set
             if [ $NO_VERIFY -eq 0 ]; then
                 echo -n "sidecar found, computing hash.... "
                 current_hash=$(compute_hash "$file")
+                if [ -z "$current_hash" ]; then
+                    echo "unreadable!"
+                    return 3
+                fi
                 if [ "$stored_hash" = "$current_hash" ]; then
                     echo "✓"
                     return 0
@@ -93,22 +137,39 @@ create_file_hash() {
                 fi
             else
                 echo "sidecar found, skipping verification"
-                return 0
+                return 4
             fi
         fi
     fi
 
-    # Create new hash
+    # Create new hash. A file that cannot be read must not get a sidecar,
+    # otherwise an empty hash would be recorded as though it were the truth.
     echo -n "no sidecar, creating.... "
     current_hash=$(compute_hash "$file")
-    echo "$current_hash" > "$hash_file"
+    if [ -z "$current_hash" ]; then
+        echo "unreadable!"
+        return 3
+    fi
+    if ! echo "$current_hash" > "$hash_file" 2>/dev/null; then
+        echo "cannot write sidecar!"
+        return 3
+    fi
+    CNT_CREATED=$((CNT_CREATED+1))
     echo "sidecar created!"
 
     # Verify newly created hash unless NO_VERIFY is set
     if [ $NO_VERIFY -eq 0 ]; then
-        local stored_hash=$(cat "$hash_file" 2>/dev/null | tr -d '[:space:]')
-        local current_hash=$(compute_hash "$file")
+        local stored_hash
+        if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
+            echo "sidecar unreadable!"
+            return 3
+        fi
         echo -n "Verification: "
+        current_hash=$(compute_hash "$file")
+        if [ -z "$current_hash" ]; then
+            echo "unreadable!"
+            return 3
+        fi
         if [ "$stored_hash" = "$current_hash" ]; then
             echo "✓"
             return 0
@@ -118,12 +179,15 @@ create_file_hash() {
         fi
     fi
 
-    return 0
+    # Sidecar was written but deliberately not read back, so it has not been
+    # verified and must not be counted as though it had been.
+    return 4
 }
 
 process_files() {
-    local mode="$1" total=0 processed=0 failed=0 skipped=0
+    local mode="$1" skipped=0
     local find_expr=()
+    CNT_SCANNED=0 CNT_OK=0 CNT_MISMATCH=0 CNT_MISSING=0 CNT_IOERR=0 CNT_CREATED=0 CNT_UNVERIFIED=0
 
     # Build find expression
     find_expr=(
@@ -148,19 +212,32 @@ fi
 find_expr+=(-print0)
 
 # If recursive is disabled, add maxdepth
-[ $RECURSIVE -eq 0 ] && find_expr=(-maxdepth 1 "${find_expr[@]}")
+[ -n "$MAXDEPTH" ] && find_expr=(-maxdepth "$MAXDEPTH" "${find_expr[@]}")
 
 # Count total files first (for verbose output of skipped files)
 if [ $VERBOSE -eq 1 ]; then
     local all_files=0
+    find "$TARGET_DIR" ${MAXDEPTH:+-maxdepth "$MAXDEPTH"} -type f -print0 > "$FIND_ERR.all" 2>/dev/null || true
     while IFS= read -r -d '' file; do
-        ((all_files++))
-    done < <(find "$TARGET_DIR" -maxdepth 1 -type f -print0 2>/dev/null)
+        all_files=$((all_files+1))
+    done < "$FIND_ERR.all"
+    rm -f "$FIND_ERR.all"
+fi
+
+# Run the walk to a file first so that its exit status survives. Inside a
+# process substitution the status is lost, so a traversal that failed outright
+# was indistinguishable from a directory that legitimately held no files.
+( cd "$TARGET_DIR" && find . "${find_expr[@]}" ) > "$FILE_LIST" 2> "$FIND_ERR"
+local find_status=$?
+if [ $find_status -ne 0 ]; then
+    error "directory walk failed (find exited $find_status); results below are incomplete"
+    sed 's/^/  /' < "$FIND_ERR" >&2
 fi
 
 # Process files
 while IFS= read -r -d '' file; do
-    ((total++))
+    CNT_SCANNED=$((CNT_SCANNED+1))
+    file="$TARGET_DIR/${file#./}"
 
     # Skip directories (extra safety)
     if [ -d "$file" ]; then
@@ -171,48 +248,77 @@ while IFS= read -r -d '' file; do
   echo -n "Verifying $file ... "
 
   if [ "$mode" = "create" ]; then
-    if create_file_hash "$file"; then
-        ((processed++))
-    else
-        ((failed++))
-    fi
-else
-    if verify_file_hash "$file"; then
-        ((processed++))
-    else
-        ((failed++))
-    fi
-fi
-done < <(cd "$TARGET_DIR" && find . "${find_expr[@]}" 2>/dev/null)
+    create_file_hash "$file"
+  else
+    verify_file_hash "$file"
+  fi
+
+  # 0 verified, 1 mismatch, 2 no usable sidecar, 3 I/O error,
+  # 4 recorded but not read back
+  case $? in
+    0) CNT_OK=$((CNT_OK+1)) ;;
+    1) CNT_MISMATCH=$((CNT_MISMATCH+1)) ;;
+    2) CNT_MISSING=$((CNT_MISSING+1)) ;;
+    3) CNT_IOERR=$((CNT_IOERR+1)) ;;
+    4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
+  esac
+done < "$FILE_LIST"
 
 # Calculate skipped files if verbose
 if [ $VERBOSE -eq 1 ]; then
-    skipped=$((all_files - total))
+    skipped=$((all_files - CNT_SCANNED))
     [ $skipped -gt 0 ] && echo "Skipped: $skipped files"
 fi
 
-echo -e "\nSummary: $total files, $processed $([ "$mode" = "create" ] && echo "created" || echo "verified"), $failed failed"
-[ $failed -gt 0 ] && return 1 || return 0
+# Each outcome gets its own line. Collapsing them into one "failed" count
+# made a corrupt file indistinguishable from a file that simply never had a
+# sidecar, which are opposite situations demanding opposite responses.
+echo
+echo "Scanned:         $CNT_SCANNED files"
+echo "Verified:        $CNT_OK"
+if [ "$mode" = "create" ]; then echo "Created:         $CNT_CREATED"; fi
+if [ $CNT_UNVERIFIED -gt 0 ]; then echo "Not verified:    $CNT_UNVERIFIED"; fi
+echo -e "Mismatched:      ${CNT_MISMATCH}$([ $CNT_MISMATCH -gt 0 ] && echo "   ${RED}<- corrupt${NC}")"
+echo "Missing/empty:   $CNT_MISSING"
+echo "I/O errors:      $CNT_IOERR"
+
+if [ $find_status -ne 0 ]; then
+    return 1
+elif [ $CNT_MISMATCH -gt 0 ] || [ $CNT_IOERR -gt 0 ]; then
+    return 1
+elif [ $CNT_MISSING -gt 0 ] && [ "$mode" != "create" ]; then
+    if [ $STRICT -eq 1 ]; then return 1; else return 2; fi
+fi
+return 0
 }
 
 # Parse arguments
-MODE="" RECURSIVE=0 TARGET_DIR=""
+MODE="" MAXDEPTH="" TARGET_DIR=""
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --version) echo "treecheck $VERSION"; exit 0 ;;
         --create) MODE="create"; shift ;;
         --force) FORCE=1; shift ;;
-        --recursive) RECURSIVE=1; shift ;;
+        --recursive) shift ;;
+        --strict) STRICT=1; shift ;;
+        --no-recurse) MAXDEPTH=1; shift ;;
+        --max-depth)
+            case "${2:-}" in
+                ''|*[!0-9]*) error "--max-depth needs a non-negative integer, got: ${2:-<missing>}"; exit 1 ;;
+            esac
+            MAXDEPTH="$2"; shift 2 ;;
         --no-verify) NO_VERIFY=1; shift ;;
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
-        -h|--help) usage ;;
+        -h|--help) usage 0 ;;
     -*)
         for (( i=1; i<${#1}; i++ )); do
             case ${1:$i:1} in
                 c) MODE="create" ;;
                 f) FORCE=1 ;;
-                r) RECURSIVE=1 ;;
+                r) ;;
                 n) NO_VERIFY=1 ;;
+                V) echo "treecheck $VERSION"; exit 0 ;;
                 v) VERBOSE=1 ;;
                 *) error "Unknown: -${1:$i:1}"; usage ;;
             esac
@@ -235,21 +341,28 @@ if [ "$MODE" = "verify" ] && [ $NO_VERIFY -eq 1 ]; then
     exit 0
 fi
 
+if [ -z "$MAXDEPTH" ]; then SCOPE_DESC="Depth: unlimited"; else SCOPE_DESC="Depth: $MAXDEPTH"; fi
+
 if [ "$MODE" = "create" ]; then
     if [ $NO_VERIFY -eq 1 ]; then
-        echo "Mode: Create only | Dir: $TARGET_DIR | Recursive: $([ $RECURSIVE -eq 1 ] && echo "Yes" || echo "No")"
+        echo "Mode: Create only | Dir: $TARGET_DIR | $SCOPE_DESC"
     else
-        echo "Mode: Create + Verify | Dir: $TARGET_DIR | Recursive: $([ $RECURSIVE -eq 1 ] && echo "Yes" || echo "No")"
+        echo "Mode: Create + Verify | Dir: $TARGET_DIR | $SCOPE_DESC"
     fi
 else
-    echo "Mode: Verify only | Dir: $TARGET_DIR | Recursive: $([ $RECURSIVE -eq 1 ] && echo "Yes" || echo "No")"
+    echo "Mode: Verify only | Dir: $TARGET_DIR | $SCOPE_DESC"
 fi
 [ ${#EXCLUDE_DIRS[@]:-} -gt 0 ] && echo "Excluding: ${EXCLUDE_DIRS[*]}"
     echo
 
-    if process_files "$MODE"; then
-        success "Completed successfully"
-    else
-        error "Completed with errors"
-        exit 1
-    fi
+    run_status=0
+    FILE_LIST=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    FIND_ERR=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    process_files "$MODE" || run_status=$?
+    case $run_status in
+        0) success "Completed successfully" ;;
+        2) echo -e "${YELLOW}Completed: nothing corrupt, but some files have no sidecar${NC}"
+           exit 2 ;;
+        *) error "Completed with errors"
+           exit 1 ;;
+    esac
