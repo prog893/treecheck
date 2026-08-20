@@ -3,6 +3,8 @@
 # NVMe integrity checker - creates/verifies SHA-256 sidecar files
 set -euo pipefail
 
+VERSION="1.0.0"
+
 # Config
 HASH_EXT=".sha256"
 VERBOSE=0
@@ -32,6 +34,7 @@ OPTIONS:
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
   --strict        Treat missing sidecars as a failure too
+  -V, --version   Print version and exit
   -h              Show this help
 
 EXIT STATUS:
@@ -250,6 +253,7 @@ return 0
 MODE="" MAXDEPTH="" TARGET_DIR=""
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --version) echo "treecheck $VERSION"; exit 0 ;;
         --create) MODE="create"; shift ;;
         --force) FORCE=1; shift ;;
         --recursive) shift ;;
@@ -267,6 +271,7 @@ while [[ $# -gt 0 ]]; do
                 f) FORCE=1 ;;
                 r) ;;
                 n) NO_VERIFY=1 ;;
+                V) echo "treecheck $VERSION"; exit 0 ;;
                 v) VERBOSE=1 ;;
                 *) error "Unknown: -${1:$i:1}"; usage ;;
             esac
