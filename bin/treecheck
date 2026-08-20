@@ -66,6 +66,7 @@ verify_file_hash() {
         return 2
     }
 
+    echo -n "sidecar found, computing hash.... "
     current_hash=$(compute_hash "$file")
     if [ -z "$current_hash" ]; then
         echo "unreadable!"
@@ -130,8 +131,8 @@ create_file_hash() {
     # Verify newly created hash unless NO_VERIFY is set
     if [ $NO_VERIFY -eq 0 ]; then
         local stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null)
-        current_hash=$(compute_hash "$file")
         echo -n "Verification: "
+        current_hash=$(compute_hash "$file")
         if [ "$stored_hash" = "$current_hash" ]; then
             echo "✓"
             return 0
