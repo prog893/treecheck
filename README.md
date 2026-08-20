@@ -30,7 +30,7 @@ Recursion is the default. Pointing it at a volume means the whole volume.
 
 ## Output
 
-```
+```text
 Mode: Verify only | Dir: /Volumes/Media | Depth: unlimited
 
 Verifying /Volumes/Media/a001.mxf ... sidecar found, computing hash.... ✓
@@ -39,11 +39,11 @@ Verifying /Volumes/Media/notes.txt ... no sidecar!
 Verifying /Volumes/Media/a003.mxf ... sidecar found, computing hash.... hash mismatch! (sidecar: dd0aec17..., computed: 968cc9a4...)
 Verifying /Volumes/Media/a004.mxf ... sidecar found, computing hash.... unreadable!
 
-Scanned:      5 files
-Verified:     2
-Mismatched:   1   <- corrupt
-No sidecar:   1
-I/O errors:   1
+Scanned:         5 files
+Verified:        2
+Mismatched:      1   <- corrupt
+Missing/empty:   1
+I/O errors:      1
 ERROR: Completed with errors
 ```
 
@@ -53,18 +53,21 @@ Each outcome is counted separately, because they mean very different things:
 |---|---|
 | **Verified** | The file still hashes to what was recorded |
 | **Mismatched** | The contents changed. This is the number that matters |
-| **No sidecar** | Nothing to compare against yet. Run with `-c` to record one |
-| **I/O errors** | The file could not be read at all, or its sidecar could not be written |
+| **Missing/empty** | No usable sidecar, either absent or empty. Run with `-c` to record one |
+| **Not verified** | Create mode with `-n`: a sidecar was written but never read back |
+| **I/O errors** | The file or its sidecar could not be read, or the sidecar could not be written |
 
 `Mismatched` and `I/O errors` are deliberately distinct. A mismatch means the bytes changed. An I/O error means the drive would not hand them over, which points at the hardware rather than at the data.
 
 ## Exit status
 
-```
+```text
 0   clean
-1   mismatches or I/O errors, meaning a real integrity problem
-2   nothing corrupt, but some files have no sidecar yet
+1   verification failed: a mismatch, an I/O error, or a failed directory walk
+2   nothing corrupt, but some files have no usable sidecar yet
 ```
+
+Status 1 means the run could not confirm your data is intact. That covers three different situations: contents that changed, files the drive would not return, and a tree that could not be fully walked. Only the first is evidence of corruption, so read the counters rather than the exit code alone when diagnosing.
 
 So this does what you would expect:
 
@@ -72,17 +75,17 @@ So this does what you would expect:
 treecheck /Volumes/Media && echo "all good"
 ```
 
-Exit code 2 keeps "your data is rotting" separate from "you added new files that need hashing", which matters when running this from cron. Pass `--strict` to treat missing sidecars as a failure too.
+Exit code 2 keeps "something needs looking at" separate from "you added new files that need hashing", which matters when running this from cron. Pass `--strict` to treat missing sidecars as a failure too.
 
 ## Options
 
-```
+```text
 -c              Create missing sidecars, and verify the ones that exist
 -f              Overwrite existing sidecars (use with -c)
 -n              Skip verification (create only; requires -c)
 -e DIRS         Exclude directories, comma-separated
 -v              Verbose (report skipped files)
--r              Accepted for compatibility; recursion is already the default
+-r, --recursive Accepted for compatibility; recursion is already the default
 --no-recurse    Only the named directory (same as --max-depth 1)
 --max-depth N   Descend at most N levels
 --strict        Treat missing sidecars as a failure too
