@@ -16,25 +16,36 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 usage() {
     cat << 'EOF'
-Usage: nvme-integrity-checker.sh [OPTIONS] <directory>
+Usage: treecheck [OPTIONS] <directory>
+
+Walks <directory> and checks every file against its .sha256 sidecar,
+reporting anything whose contents no longer match. Recursive by default.
+Never modifies, moves or deletes your data.
 
 OPTIONS:
--c Create hashes + verify existing (default: verify only)
--f Force overwrite existing hashes
--r Accepted for compatibility; recursion is already the default
--e Exclude dirs (comma-separated)
--n No verify (create only)
---no-recurse Only the named directory, do not descend
---max-depth N Descend at most N levels
--v Verbose (show skipped files)
---strict Treat missing sidecars as a failure too
--h Help
+  -c              Create missing sidecars, and verify the ones that exist
+  -f              Overwrite existing sidecars (use with -c)
+  -n              Skip verification (create only; requires -c)
+  -e DIRS         Exclude directories, comma-separated
+  -v              Verbose (report skipped files)
+  -r              Accepted for compatibility; recursion is already the default
+  --no-recurse    Only the named directory (same as --max-depth 1)
+  --max-depth N   Descend at most N levels
+  --strict        Treat missing sidecars as a failure too
+  -h              Show this help
+
+EXIT STATUS:
+  0   clean
+  1   mismatches or I/O errors, meaning a real integrity problem
+  2   nothing corrupt, but some files have no sidecar yet
 
 EXAMPLES:
-script.sh /data # Verify only
-script.sh -c /data # Create + verify
-script.sh -cn /data # Create only
-script.sh -cr -e "temp,logs" /data # Create + verify, exclude dirs
+  treecheck /Volumes/Media                   Verify the whole tree
+  treecheck -c /Volumes/Media                Create missing sidecars, verify rest
+  treecheck -cn /Volumes/Media               Create only, skip verification
+  treecheck --no-recurse /Volumes/Media      Top level only
+  treecheck -e "temp,cache" /Volumes/Media   Skip those directories
+  treecheck --strict /Volumes/Media          Missing sidecars are failures too
 EOF
     exit 1
 }

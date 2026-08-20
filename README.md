@@ -1,145 +1,125 @@
-# NVMe Integrity Checker
+# treecheck
 
-A bash script that creates and verifies SHA-256 sidecar files for data integrity checking. Perfect for protecting important files on NVMe drives, external storage, or any filesystem.
+Walk a directory tree and verify every file against its SHA-256 sidecar.
 
-## Features
+Storage fails quietly. A drive that sits disconnected for months can lose charge in its NAND cells, a flaky cable can corrupt a transfer, and a bad copy can truncate a file, all without anything reporting an error. The filesystem hands you the damaged bytes exactly as confidently as it handed you the good ones. `treecheck` gives you a way to notice.
 
-- **Safe operation** - Never deletes or modifies original files
-- **Multiple modes** - Verify-only, create+verify, create-only
-- **Flexible exclusions** - Skip system directories or unwanted paths
-- **Recursive processing** - Handle entire directory trees
-- **Clear reporting** - Shows hash mismatches, missing files, and summary stats
+It records a `.sha256` file next to each of your files, then re-reads both later and tells you what no longer matches.
 
-## Usage
+It never modifies, moves or deletes your data. The only files it writes are sidecars.
+
+## Install
 
 ```bash
-./nvme-integrity-checker.sh [OPTIONS] <directory>
+brew install prog893/tap/treecheck
 ```
 
-### Options
+Or run the script directly. It needs nothing beyond `bash`, `find` and `shasum`.
 
-- `-c` Create hashes + verify existing (default: verify only)
-- `-f` Force overwrite existing hashes
-- `-r` Recursive
-- `-e` Exclude dirs (comma-separated)
-- `-n` Skip verify (requires `-c`, creates sidecars without verification)
-- `-v` Verbose
-- `-h` Help
+## Quick start
 
-### Mode Combinations
-
-- **No flags** → Verify only
-- **`-c`** → Create and verify
-- **`-c -n`** → Create only, skip verify
-- **`-n` without `-c`** → Does nothing (exits with "Nothing to do" message)
-
-## Examples
-
-### Verify-Only Mode (Default)
-Check existing sidecar files for integrity violations:
 ```bash
-# Verify files in current directory
-./nvme-integrity-checker.sh .
+# Record hashes for everything, then verify them
+treecheck -c /Volumes/Media
 
-# Verify recursively with verbose output
-./nvme-integrity-checker.sh -rv /path/to/data
-
-# Verify excluding specific directories
-./nvme-integrity-checker.sh -rv -e "temp,cache" /Volumes/MyDrive
+# Later, check whether anything has changed
+treecheck /Volumes/Media
 ```
 
-### Create + Verify Mode
-Create new sidecars and verify existing ones:
-```bash
-# Create sidecars for new files, verify existing ones
-./nvme-integrity-checker.sh -cr /path/to/data
+Recursion is the default. Pointing it at a volume means the whole volume.
 
-# With exclusions and verbose output
-./nvme-integrity-checker.sh -crv -e "temp,logs,cache" /path/to/data
+## Output
+
 ```
+Mode: Verify only | Dir: /Volumes/Media | Depth: unlimited
 
-### Create-Only Mode
-Create sidecars without verification (requires both `-c` and `-n`):
-```bash
-# Fast mode - only create missing sidecars, no verification
-./nvme-integrity-checker.sh -cnr /path/to/data
+Verifying /Volumes/Media/a001.mxf ... sidecar found, computing hash.... ✓
+Verifying /Volumes/Media/a002.mxf ... sidecar found, computing hash.... ✓
+Verifying /Volumes/Media/notes.txt ... no sidecar!
+Verifying /Volumes/Media/a003.mxf ... sidecar found, computing hash.... hash mismatch! (sidecar: dd0aec17..., computed: 968cc9a4...)
+Verifying /Volumes/Media/a004.mxf ... sidecar found, computing hash.... unreadable!
 
-# Useful for initial setup or adding sidecars to new files quickly
-./nvme-integrity-checker.sh -cnrv -e "temp,logs" /Volumes/ExternalDrive
-
-# Note: Using -n without -c will exit with "Nothing to do"
-```
-
-## Output Examples
-
-### Successful Verification
-```
-Mode: Verify only | Dir: /data | Recursive: Yes
-
-✓ Verified: /data/video.mp4
-✓ Verified: /data/audio.wav
-
-Summary: 2 files, 2 verified, 0 failed
-✓ Completed successfully
-```
-
-### Hash Mismatch Detection
-```
-Mode: Verify only | Dir: /data | Recursive: Yes
-
-✓ Verified: /data/good_file.txt
-HASH MISMATCH: corrupted_file.txt
-
-Summary: 2 files, 1 verified, 1 failed
+Scanned:      5 files
+Verified:     2
+Mismatched:   1   <- corrupt
+No sidecar:   1
+I/O errors:   1
 ERROR: Completed with errors
 ```
 
-### Create + Verify Mode
+Each outcome is counted separately, because they mean very different things:
+
+| Line | Meaning |
+|---|---|
+| **Verified** | The file still hashes to what was recorded |
+| **Mismatched** | The contents changed. This is the number that matters |
+| **No sidecar** | Nothing to compare against yet. Run with `-c` to record one |
+| **I/O errors** | The file could not be read at all, or its sidecar could not be written |
+
+`Mismatched` and `I/O errors` are deliberately distinct. A mismatch means the bytes changed. An I/O error means the drive would not hand them over, which points at the hardware rather than at the data.
+
+## Exit status
+
 ```
-Mode: Create + Verify | Dir: /data | Recursive: Yes
-
-Hash exists for: /data/old_file.txt
-Verifying: /data/old_file.txt
-✓ Verified: /data/old_file.txt
-Hashing: /data/new_file.txt
-Created: /data/new_file.txt.sha256
-Verifying: /data/new_file.txt
-✓ Verified: /data/new_file.txt
-
-Summary: 2 files, 2 created, 0 failed
-✓ Completed successfully
-```
-
-### Create-Only Mode (Skip Verify)
-```
-Mode: Create only (skip verify) | Dir: /data | Recursive: Yes
-
-Hashing: /data/new_file1.txt
-Created: /data/new_file1.txt.sha256
-Hashing: /data/new_file2.txt
-Created: /data/new_file2.txt.sha256
-
-Summary: 2 files, 2 created, 0 failed
-✓ Completed successfully
+0   clean
+1   mismatches or I/O errors, meaning a real integrity problem
+2   nothing corrupt, but some files have no sidecar yet
 ```
 
-## How It Works
+So this does what you would expect:
 
-1. **Sidecar files**: Creates `.sha256` files alongside your data files
-2. **SHA-256 hashing**: Uses cryptographically secure hashing
-3. **Non-destructive**: Only creates new files, never modifies originals
-4. **Smart skipping**: Automatically skips `.sha256` files and dot files/directories
+```bash
+treecheck /Volumes/Media && echo "all good"
+```
 
-## Use Cases
+Exit code 2 keeps "your data is rotting" separate from "you added new files that need hashing", which matters when running this from cron. Pass `--strict` to treat missing sidecars as a failure too.
 
-- **NVMe drive integrity monitoring** - Detect silent data corruption
-- **Backup verification** - Ensure backups haven't been corrupted
-- **Archive integrity** - Long-term storage verification
-- **Transfer verification** - Confirm files copied correctly
-- **Media protection** - Protect video/audio files from corruption
+## Options
+
+```
+-c              Create missing sidecars, and verify the ones that exist
+-f              Overwrite existing sidecars (use with -c)
+-n              Skip verification (create only; requires -c)
+-e DIRS         Exclude directories, comma-separated
+-v              Verbose (report skipped files)
+-r              Accepted for compatibility; recursion is already the default
+--no-recurse    Only the named directory (same as --max-depth 1)
+--max-depth N   Descend at most N levels
+--strict        Treat missing sidecars as a failure too
+-h              Show this help
+```
+
+Mode combinations:
+
+| Flags | Behavior |
+|---|---|
+| none | Verify only |
+| `-c` | Create missing sidecars and verify existing ones |
+| `-c -n` | Create only, skip verification |
+| `-n` alone | Nothing to do, exits with a message |
+
+## How it works
+
+For `video.mxf`, `treecheck` writes `video.mxf.sha256` containing that file's SHA-256 digest. On a later run it re-hashes `video.mxf` and compares.
+
+One hash per file, rather than a single hash over the whole tree, is deliberate. It means one corrupted file tells you exactly which file is corrupt instead of invalidating everything around it, and it means sidecars survive being moved alongside their data.
+
+Hidden files and directories are skipped, along with the usual macOS metadata (`.Spotlight-V100`, `.fseventsd`, `.Trashes` and friends).
+
+## Things worth knowing
+
+**Verify before you create.** If a file's sidecar is missing, `-c` hashes whatever is there now and records it as correct. Run a plain verify pass first, so you find out whether a file was already damaged before blessing its current contents.
+
+**Sidecars live beside the data.** If a directory is lost, its sidecars go with it. This tool detects corruption, it does not protect against it. It is a smoke alarm, not a fire extinguisher, and it is no substitute for backups.
+
+**Every run re-reads everything.** Verifying terabytes means reading terabytes, so a full pass over a large archive takes as long as reading the whole archive.
 
 ## Requirements
 
-- Bash shell
-- `shasum` command (standard on macOS/Linux)
-- `find` command with `-print0` support
+- `bash`
+- `shasum` (standard on macOS and Linux)
+- `find` with `-print0` support
+
+## License
+
+MIT
