@@ -161,6 +161,7 @@ fi
 # Process files
 while IFS= read -r -d '' file; do
     ((total++))
+    file="$TARGET_DIR/${file#./}"
 
     # Skip directories (extra safety)
     if [ -d "$file" ]; then
