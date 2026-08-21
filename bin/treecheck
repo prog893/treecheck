@@ -3,7 +3,7 @@
 # NVMe integrity checker - creates/verifies SHA-256 sidecar files
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="2.0.0"
 
 # Config
 HASH_EXT=".sha256"
@@ -30,7 +30,6 @@ OPTIONS:
   -n              Skip verification (create only; requires -c)
   -e DIRS         Exclude directories, comma-separated
   -v              Verbose (report skipped files)
-  -r, --recursive Accepted for compatibility; recursion is already the default
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
   --strict        Treat missing sidecars as a failure too
@@ -306,7 +305,6 @@ while [[ $# -gt 0 ]]; do
         --version) echo "treecheck $VERSION"; exit 0 ;;
         --create) MODE="create"; shift ;;
         --force) FORCE=1; shift ;;
-        --recursive) shift ;;
         --strict) STRICT=1; shift ;;
         --no-recurse) MAXDEPTH=1; shift ;;
         --max-depth)
@@ -318,12 +316,12 @@ while [[ $# -gt 0 ]]; do
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
         -h|--help) usage 0 ;;
+        --*) error "Unknown option: $1"; usage ;;
     -*)
         for (( i=1; i<${#1}; i++ )); do
             case ${1:$i:1} in
                 c) MODE="create" ;;
                 f) FORCE=1 ;;
-                r) ;;
                 n) NO_VERIFY=1 ;;
                 V) echo "treecheck $VERSION"; exit 0 ;;
                 v) VERBOSE=1 ;;

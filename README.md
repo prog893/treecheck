@@ -85,7 +85,6 @@ Exit code 2 keeps "something needs looking at" separate from "you added new file
 -n              Skip verification (create only; requires -c)
 -e DIRS         Exclude directories, comma-separated
 -v              Verbose (report skipped files)
--r, --recursive Accepted for compatibility; recursion is already the default
 --no-recurse    Only the named directory (same as --max-depth 1)
 --max-depth N   Descend at most N levels
 --strict        Treat missing sidecars as a failure too
@@ -108,7 +107,7 @@ For `video.mxf`, `treecheck` writes `video.mxf.sha256` containing that file's SH
 
 One hash per file, rather than a single hash over the whole tree, is deliberate. It means one corrupted file tells you exactly which file is corrupt instead of invalidating everything around it, and it means sidecars survive being moved alongside their data.
 
-Hidden files and directories are skipped, along with the usual macOS metadata (`.Spotlight-V100`, `.fseventsd`, `.Trashes` and friends).
+Hidden files and directories are skipped at every level, and are never descended into. That matters on macOS volume roots, where `.Trashes`, `.DocumentRevisions-V100` and `.TemporaryItems` are unreadable: merely looking inside them makes the directory walk fail, which would otherwise be reported as a failed run.
 
 ## Things worth knowing
 
