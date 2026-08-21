@@ -189,17 +189,21 @@ process_files() {
     local find_expr=()
     CNT_SCANNED=0 CNT_OK=0 CNT_MISMATCH=0 CNT_MISSING=0 CNT_IOERR=0 CNT_CREATED=0 CNT_UNVERIFIED=0
 
-    # Build find expression
+    # Build find expression.
+    #
+    # Hidden entries are PRUNED, not merely filtered out of the results. The
+    # previous "! -path */.*" only discarded matches after the fact, so find
+    # still descended into .Trashes, .DocumentRevisions-V100, .TemporaryItems
+    # and friends. On a real volume those are unreadable, which made find exit
+    # non-zero and turned an ordinary scan into a reported walk failure.
+    #
+    # The pattern is ".?*" rather than ".*" because find's starting point is
+    # "." itself: ".*" matches it, prunes the entire tree and finds nothing.
     find_expr=(
+      -name '.?*' -prune
+      -o
       -type f
       ! -name "*$HASH_EXT"
-      ! -path "*/.DocumentRevisions-V100/*"
-      ! -path "*/.DS_Store/*"
-      ! -path "*/.fseventsd/*"
-      ! -path "*/.Spotlight-V100/*"
-      ! -path "*/.TemporaryItems/*"
-      ! -path "*/.Trashes/*"
-      ! -path "*/.*"
   )
 
   # Exclude user-specified directories
@@ -217,7 +221,10 @@ find_expr+=(-print0)
 # Count total files first (for verbose output of skipped files)
 if [ $VERBOSE -eq 1 ]; then
     local all_files=0
-    find "$TARGET_DIR" ${MAXDEPTH:+-maxdepth "$MAXDEPTH"} -type f -print0 > "$FIND_ERR.all" 2>/dev/null || true
+    # Same cd-then-"find ." form as the real walk: with an absolute path the
+    # starting point itself would match ".?*" whenever the target is hidden
+    # (treecheck ~/.config), pruning the entire tree and counting nothing.
+    ( cd "$TARGET_DIR" && find . ${MAXDEPTH:+-maxdepth "$MAXDEPTH"} -name '.?*' -prune -o -type f -print0 ) > "$FIND_ERR.all" 2>/dev/null || true
     while IFS= read -r -d '' file; do
         all_files=$((all_files+1))
     done < "$FIND_ERR.all"
