@@ -39,7 +39,7 @@ fixture holding **all** outcome categories at once:
 
 Confirm exit status every time, since it is a documented interface:
 
-```
+```text
 0   clean
 1   verification failed: a mismatch, an I/O error, or a failed walk
 2   nothing corrupt, but some files have no usable sidecar
@@ -90,6 +90,21 @@ Quirks that have cost real time on this repo:
   tick down. A review body instead reports the hourly quota, in which case the
   next slot is that review's `submitted_at` plus one hour. Wait, then kick
   **once**. Do not poll a rate-limited PR.
+- **An APPROVED assessment in prose is not an approving review.** CodeRabbit
+  will state "Current assessment: APPROVED" in a comment and leave
+  `reviewDecision` sitting at CHANGES_REQUESTED. Asking it to submit the
+  disposition does not help: it acknowledges the mismatch, runs another full
+  review, and still posts no review object, because it will not submit one
+  when the incremental diff has no new findings. The resolution is to dismiss
+  the stale review with the reason recorded, not to keep re-kicking:
+
+  ```bash
+  RID=$(gh api repos/prog893/treecheck/pulls/<N>/reviews \
+    --jq '[.[]|select(.user.login|startswith("coderabbitai"))][0].id')
+  gh api -X PUT repos/prog893/treecheck/pulls/<N>/reviews/$RID/dismissals \
+    -f message="Superseded by CodeRabbit's later APPROVED assessment" -f event=DISMISS
+  ```
+
 - **Argue when it is wrong.** It verifies and withdraws findings that do not
   hold up, but only against evidence: a measurement, a reproduction, or a
   reason the suggested fix defeats the feature.
