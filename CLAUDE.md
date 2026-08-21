@@ -45,6 +45,9 @@ Confirm exit status every time, since it is a documented interface:
 2   nothing corrupt, but some files have no usable sidecar
 ```
 
+Status 2 is the non-strict case. Under `--strict` a missing or empty sidecar
+is a failure like any other, so those runs return 1 and never 2.
+
 Check `-h` exits 0, invalid options exit 1, and that the help text and the
 README option list still agree. They have drifted apart before.
 
@@ -60,8 +63,12 @@ README option list still agree. They have drifted apart before.
 - `! -path "*/.*"` filters hidden entries out of results but does **not** stop
   `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
   walk starts at `.`, which a bare `.*` matches, pruning the entire tree.
-- Homebrew's `Pathname#write` refuses to overwrite an existing file. Use
-  `File.write` when a test deliberately corrupts a fixture.
+- Inside a formula, `Pathname#write` refuses to overwrite an existing file.
+  Homebrew replaces the stdlib method via `WriteMkpathExtension`, which raises
+  `"Will not overwrite #{self}"` when the path already exists
+  (`Library/Homebrew/extend/pathname/write_mkpath_extension.rb`). Ruby's own
+  `Pathname#write` and `File.write` both overwrite happily, so use `File.write`
+  when a test deliberately corrupts a fixture.
 
 ## Merge gate
 
@@ -99,10 +106,17 @@ Quirks that have cost real time on this repo:
   the stale review with the reason recorded, not to keep re-kicking:
 
   ```bash
+  # Select the blocking review specifically. Taking [0] unconditionally would
+  # target whatever review happens to be first, including an APPROVED one.
   RID=$(gh api repos/prog893/treecheck/pulls/<N>/reviews \
-    --jq '[.[]|select(.user.login|startswith("coderabbitai"))][0].id')
-  gh api -X PUT repos/prog893/treecheck/pulls/<N>/reviews/$RID/dismissals \
-    -f message="Superseded by CodeRabbit's later APPROVED assessment" -f event=DISMISS
+    --jq '[.[] | select(.user.login | startswith("coderabbitai"))
+                | select(.state == "CHANGES_REQUESTED")] | last | .id // empty')
+  if [ -z "$RID" ]; then
+    echo "no blocking CodeRabbit review to dismiss"
+  else
+    gh api -X PUT repos/prog893/treecheck/pulls/<N>/reviews/"$RID"/dismissals \
+      -f message="Superseded by CodeRabbit's later APPROVED assessment" -f event=DISMISS
+  fi
   ```
 
 - **Argue when it is wrong.** It verifies and withdraws findings that do not
