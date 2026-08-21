@@ -3,7 +3,7 @@
 # NVMe integrity checker - creates/verifies SHA-256 sidecar files
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="1.1.0"
 
 # Config
 HASH_EXT=".sha256"
@@ -217,7 +217,14 @@ find_expr+=(-print0)
 # If recursive is disabled, add maxdepth
 [ -n "$MAXDEPTH" ] && find_expr=(-maxdepth "$MAXDEPTH" "${find_expr[@]}")
 
-# Count total files first (for verbose output of skipped files)
+# Count every file the walk could have reached, so that subtracting the
+# number actually checked reports what was passed over and why.
+#
+# This deliberately does NOT reuse find_expr. Sharing it would make the two
+# counts identical and the difference permanently zero. The one thing both
+# must agree on is pruning hidden entries, since descending into them is what
+# breaks on a real volume; sidecars and --exclude paths are exactly the
+# categories this difference is meant to surface.
 if [ $VERBOSE -eq 1 ]; then
     local all_files=0
     # Same cd-then-"find ." form as the real walk: with an absolute path the
@@ -273,7 +280,7 @@ done < "$FILE_LIST"
 # Calculate skipped files if verbose
 if [ $VERBOSE -eq 1 ]; then
     skipped=$((all_files - CNT_SCANNED))
-    [ $skipped -gt 0 ] && echo "Skipped: $skipped files"
+    [ $skipped -gt 0 ] && echo "Skipped: $skipped files (sidecars and --exclude paths)"
 fi
 
 # Each outcome gets its own line. Collapsing them into one "failed" count

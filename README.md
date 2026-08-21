@@ -107,7 +107,9 @@ For `video.mxf`, `treecheck` writes `video.mxf.sha256` containing that file's SH
 
 One hash per file, rather than a single hash over the whole tree, is deliberate. It means one corrupted file tells you exactly which file is corrupt instead of invalidating everything around it, and it means sidecars survive being moved alongside their data.
 
-Hidden files and directories are skipped at every level, and are never descended into. That matters on macOS volume roots, where `.Trashes`, `.DocumentRevisions-V100` and `.TemporaryItems` are unreadable: merely looking inside them makes the directory walk fail, which would otherwise be reported as a failed run.
+Hidden files and directories found during the walk are skipped at every level, and are never descended into. That matters on macOS volume roots, where `.Trashes`, `.DocumentRevisions-V100` and `.TemporaryItems` are unreadable: merely looking inside them makes the directory walk fail, which would otherwise be reported as a failed run.
+
+The directory you name is always scanned, even if it is itself hidden, so `treecheck ~/.config` works as expected. Only hidden entries *inside* the tree are pruned.
 
 ## Things worth knowing
 
