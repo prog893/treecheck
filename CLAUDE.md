@@ -1,7 +1,9 @@
 # treecheck Development Guide
 
 A single POSIX-ish bash script at `bin/treecheck`. No build step, no
-dependencies beyond `bash`, `find` and `shasum`.
+dependencies beyond `bash` and the standard userland it calls: `find`,
+`shasum`, `tr`, `sed`, `rm`, `mktemp`. Anything a minimal container strips
+beyond those is a real portability break.
 
 ## What this tool promises
 
@@ -36,6 +38,7 @@ fixture holding **all** outcome categories at once:
 | nested subdirectory | scanned |
 | unreadable **hidden** dir (`.Trashes`) | pruned, no error |
 | unreadable **non-hidden** dir | walk fails, exit 1 |
+| create-only run over a fresh tree (`-c -n`) | counted as `Not verified`, never as `Verified` |
 
 Confirm exit status every time, since it is a documented interface:
 
@@ -137,7 +140,9 @@ Quirks that have cost real time on this repo:
 
 ## Releasing
 
-Version lives in exactly one place: `VERSION` at the top of `bin/treecheck`.
+`VERSION` at the top of `bin/treecheck` is the source of truth. The git tag
+and the formula URL are derived references, synchronized to it during a
+release; they are copies, not additional places where the version is chosen.
 
 1. Bump `VERSION`, land the change through a PR and the merge gate above.
 2. Tag `vX.Y.Z` on `main` and push the tag.
