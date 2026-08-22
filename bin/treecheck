@@ -12,6 +12,7 @@ FORCE=0
 NO_VERIFY=0
 STRICT=0
 EXCLUDE_DIRS=()
+JOBS=0   # 0 = auto: one worker per CPU
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -29,6 +30,7 @@ OPTIONS:
   -f              Overwrite existing sidecars (use with -c)
   -n              Skip verification (create only; requires -c)
   -e DIRS         Exclude directories, comma-separated
+  -j N, --jobs N  Hash across N parallel workers (default: one per CPU)
   -v              Verbose (report skipped files)
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
@@ -47,17 +49,20 @@ EXAMPLES:
   treecheck -cn /Volumes/Media               Create only, skip verification
   treecheck --no-recurse /Volumes/Media      Top level only
   treecheck -e "temp,cache" /Volumes/Media   Skip those directories
-  treecheck --strict /Volumes/Media          Missing sidecars are failures too
+    treecheck --strict /Volumes/Media          Missing sidecars are failures too
 EOF
     exit "${1:-1}"
 }
 
 error() { echo -e "${RED}ERROR: $*${NC}" >&2; }
 
-FILE_LIST="" FIND_ERR=""
+FILE_LIST="" FIND_ERR="" RESULTS="" SORTED="" WORK_INPUT=""
 cleanup_tmp() {
     [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST"
     [ -n "$FIND_ERR" ] && rm -f "$FIND_ERR" "$FIND_ERR.all"
+    [ -n "$RESULTS" ] && rm -f "$RESULTS"
+    [ -n "$SORTED" ] && rm -f "$SORTED"
+    [ -n "$WORK_INPUT" ] && rm -f "$WORK_INPUT"
     return 0
 }
 trap cleanup_tmp EXIT
@@ -191,6 +196,107 @@ create_file_hash() {
     return 4
 }
 
+# One unit of parallel work. Emits a single tab-separated record:
+#   index <TAB> status <TAB> created(0|1) <TAB> display line
+# The status codes are data here, not exit codes: the worker always exits 0
+# so that xargs does not mistake an ordinary corrupt file for a broken run.
+# Subshells cannot mutate the parent's counters, so "created" travels in the
+# record instead of being incremented inside create_file_hash.
+hash_worker() {
+    local i="$1" f="$2" existed=0 out rc
+    if [ "$WORKER_MODE" = "create" ]; then
+        [ -f "${f}${HASH_EXT}" ] && existed=1
+        out=$(create_file_hash "$f" 2>&1); rc=$?
+        # One record must be one physical line: create mode legitimately
+        # prints two (the creation report, then the read-back verdict), so
+        # newlines travel escaped and are restored just before display.
+        out=${out//$'\n'/$'\001'}
+        if [ $existed -eq 0 ] && { [ $rc -eq 0 ] || [ $rc -eq 4 ]; }; then
+            printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" 1 "$f" "$out"
+        else
+            printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" 0 "$f" "$out"
+        fi
+    else
+        out=$(verify_file_hash "$f" 2>&1); rc=$?
+        out=${out//$'\n'/$'\001'}
+        printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" 0 "$f" "$out"
+    fi
+    return 0
+}
+
+# Hash FILE_LIST across $JOBS workers. Results land in one file as records,
+# are sorted back into walk order, and replayed so the output is identical
+# to what the sequential engine prints, whatever order the workers finish in.
+parallel_process_files() {
+    local mode="$1"
+    RESULTS=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    SORTED=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    WORK_INPUT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+
+    WORKER_MODE="$mode"
+    export WORKER_MODE HASH_EXT FORCE NO_VERIFY
+    export -f hash_worker verify_file_hash create_file_hash compute_hash
+
+    echo "Hashing with $JOBS parallel workers..."
+
+    # Index and path travel as two NUL-separated arguments per worker. The
+    # enumeration runs against a file, not a pipeline: inside `while | xargs`
+    # the loop is a subshell and its counter never comes back, which would
+    # silently report zero dispatched files.
+    local idx=0
+    while IFS= read -r -d '' f; do
+        printf '%s\0%s\0' "$idx" "$TARGET_DIR/${f#./}"
+        idx=$((idx+1))
+    done < "$FILE_LIST" > "$WORK_INPUT"
+    TOTAL_FILES=$idx
+
+    # xargs is guarded against empty input because GNU and BSD disagree on
+    # whether an empty list still runs the command once.
+    if [ "$TOTAL_FILES" -gt 0 ]; then
+        xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
+            < "$WORK_INPUT" > "$RESULTS" || { error "parallel hashing failed"; exit 1; }
+    fi
+
+    sort -n "$RESULTS" > "$SORTED" || { error "could not order results"; exit 1; }
+
+    local i rc created line expected=0
+    while IFS=$'\t' read -r i rc created line; do
+        # A path containing a newline would split its record and shift every
+        # index after it; a tab inside a path would shift the fields of one
+        # record. Both are refused loudly instead of printing shifted or
+        # mislabeled verdicts: a report that looks right but describes the
+        # wrong files is the one failure this tool must never have.
+        # Sequential mode handles such trees correctly; suggest it and stop.
+        if [ "$i" != "$expected" ] || { [ "$created" != "0" ] && [ "$created" != "1" ]; }; then
+            error "internal: results arrived misaligned at record $expected (got $i)"
+            error "the tree may contain paths with newlines; rerun with -j 1"
+            exit 1
+        fi
+        case $rc in
+            0|1|2|3|4) : ;;
+            *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
+        esac
+        expected=$((expected+1))
+        line=${line//$'\001'/$'\n'}
+        echo "$line"
+        case $rc in
+            0) CNT_OK=$((CNT_OK+1)) ;;
+            1) CNT_MISMATCH=$((CNT_MISMATCH+1)) ;;
+            2) CNT_MISSING=$((CNT_MISSING+1)) ;;
+            3) CNT_IOERR=$((CNT_IOERR+1)) ;;
+            4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
+        esac
+        [ "$created" = "1" ] && CNT_CREATED=$((CNT_CREATED+1))
+        CNT_SCANNED=$((CNT_SCANNED+1))
+    done < "$SORTED"
+
+    if [ "$CNT_SCANNED" -ne "$TOTAL_FILES" ]; then
+        error "internal: $TOTAL_FILES files were dispatched but $CNT_SCANNED results came back"
+        error "rerun with -j 1 and report this output"
+        exit 1
+    fi
+}
+
 process_files() {
     local mode="$1" skipped=0
     local find_expr=()
@@ -255,7 +361,11 @@ if [ $find_status -ne 0 ]; then
     sed 's/^/  /' < "$FIND_ERR" >&2
 fi
 
-# Process files
+# Process files: parallel engine when more than one worker was asked for,
+# otherwise the original sequential loop, byte for byte.
+if [ "$JOBS" -gt 1 ]; then
+    parallel_process_files "$mode"
+else
 while IFS= read -r -d '' file; do
     CNT_SCANNED=$((CNT_SCANNED+1))
     file="$TARGET_DIR/${file#./}"
@@ -284,6 +394,7 @@ while IFS= read -r -d '' file; do
     4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
   esac
 done < "$FILE_LIST"
+fi
 
 # Calculate skipped files if verbose
 if [ $VERBOSE -eq 1 ]; then
@@ -329,6 +440,11 @@ while [[ $# -gt 0 ]]; do
             MAXDEPTH="$2"; shift 2 ;;
         --no-verify) NO_VERIFY=1; shift ;;
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
+        --jobs|-j)
+            case "${2:-}" in
+                ''|*[!0-9]*|0) error "--jobs needs a positive integer, got: ${2:-<missing>}"; exit 1 ;;
+            esac
+            JOBS="$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
         -h|--help) usage 0 ;;
         --*) error "Unknown option: $1"; usage ;;
@@ -352,6 +468,14 @@ done
 [ -z "$TARGET_DIR" ] && { error "No directory specified"; usage; }
 [ ! -d "$TARGET_DIR" ] && { error "Directory not found: $TARGET_DIR"; exit 1; }
 
+# Resolve automatic worker count: one per CPU, on either platform.
+if [ "$JOBS" -eq 0 ]; then
+    JOBS=$( { sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1; } | tail -n 1 )
+    case "$JOBS" in
+        ''|*[!0-9]*|0) JOBS=1 ;;
+    esac
+fi
+
 # Set default mode
 [ -z "$MODE" ] && MODE="verify"
 
@@ -373,6 +497,7 @@ else
     echo "Mode: Verify only | Dir: $TARGET_DIR | $SCOPE_DESC"
 fi
 [ ${#EXCLUDE_DIRS[@]:-} -gt 0 ] && echo "Excluding: ${EXCLUDE_DIRS[*]}"
+[ "$JOBS" -gt 1 ] && echo "Workers: $JOBS (parallel hashing)"
     echo
 
     run_status=0

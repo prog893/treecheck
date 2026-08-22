@@ -84,6 +84,7 @@ Exit code 2 keeps "something needs looking at" separate from "you added new file
 -f              Overwrite existing sidecars (use with -c)
 -n              Skip verification (create only; requires -c)
 -e DIRS         Exclude directories, comma-separated
+-j N, --jobs N  Hash across N parallel workers (default: one per CPU)
 -v              Verbose (report skipped files)
 --no-recurse    Only the named directory (same as --max-depth 1)
 --max-depth N   Descend at most N levels
