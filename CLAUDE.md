@@ -106,11 +106,18 @@ Quirks that have cost real time on this repo:
   the stale review with the reason recorded, not to keep re-kicking:
 
   ```bash
-  # Select the blocking review specifically. Taking [0] unconditionally would
-  # target whatever review happens to be first, including an APPROVED one.
-  RID=$(gh api repos/prog893/treecheck/pulls/<N>/reviews \
-    --jq '[.[] | select(.user.login | startswith("coderabbitai"))
-                | select(.state == "CHANGES_REQUESTED")] | last | .id // empty')
+  # Select the blocking review specifically: every page (not just the first
+  # 30), CodeRabbit only, CHANGES_REQUESTED only, latest by submitted_at.
+  # Taking [0] or the first page unconditionally would target whatever review
+  # happens to be there, including an APPROVED one.
+  BLOCKING=$(gh api --paginate "repos/prog893/treecheck/pulls/<N>/reviews?per_page=100" \
+    --jq '.[] | select(.user.login | startswith("coderabbitai"))
+                | select(.state == "CHANGES_REQUESTED")
+                | "\(.submitted_at) \(.id)"') || {
+    echo "review lookup failed; refusing to dismiss on a guess" >&2
+    exit 1
+  }
+  RID=$(printf '%s\n' "$BLOCKING" | sort | tail -n 1 | cut -d ' ' -f2)
   if [ -z "$RID" ]; then
     echo "no blocking CodeRabbit review to dismiss"
   else
@@ -118,6 +125,11 @@ Quirks that have cost real time on this repo:
       -f message="Superseded by CodeRabbit's later APPROVED assessment" -f event=DISMISS
   fi
   ```
+
+  Note that `gh api --slurp` refuses to combine with `--jq`, so collecting all
+  pages through one jq process is not available here; the filter above runs per
+  page and the TSV lines are sorted afterwards. ISO timestamps sort correctly
+  as text.
 
 - **Argue when it is wrong.** It verifies and withdraws findings that do not
   hold up, but only against evidence: a measurement, a reproduction, or a
