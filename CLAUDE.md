@@ -85,7 +85,8 @@ README option list still agree. They have drifted apart before.
 
 ```bash
 gh pr view <N> --repo prog893/treecheck --json reviewDecision,reviews \
-  --jq '{decision:.reviewDecision, reviews:[.reviews[]|.state]}'
+  --jq '{decision:.reviewDecision,
+         reviews:[.reviews[] | {author:.author.login, state:.state}]}'
 ```
 
 Quirks that have cost real time on this repo:
@@ -151,7 +152,9 @@ release; they are copies, not additional places where the version is chosen.
 
 1. Bump `VERSION`, land the change through a PR and the merge gate above.
 2. Tag `vX.Y.Z` on `main` and push the tag.
-3. In `prog893/homebrew-tap`, update the tag in `Formula/treecheck.rb`.
+3. In `prog893/homebrew-tap`, update the tag in `Formula/treecheck.rb`,
+   commit, and push. The formula only exists for anyone else once the tap
+   repository has the commit; a local edit is invisible to `brew update`.
 4. `brew update && brew upgrade treecheck`, then `brew test treecheck` and
    `brew audit --formula prog893/tap/treecheck`. Both must pass clean.
 
