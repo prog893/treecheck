@@ -51,6 +51,11 @@ Confirm exit status every time, since it is a documented interface:
 Status 2 is the non-strict case. Under `--strict` a missing or empty sidecar
 is a failure like any other, so those runs return 1 and never 2.
 
+This contract describes **verification mode**. A create-only run (`-c -n`)
+records each new sidecar as internally not-read-back (status 4) yet still
+exits 0 when nothing is corrupt: the exit code carries only corrupt / I/O /
+walk failures, so that table row never surfaces as a nonzero exit.
+
 Check `-h` exits 0, invalid options exit 1, and that the help text and the
 README option list still agree. They have drifted apart before.
 
