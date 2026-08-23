@@ -89,6 +89,21 @@ gh pr view <N> --repo prog893/treecheck --json reviewDecision,reviews \
          reviews:[.reviews[] | {author:.author.login, state:.state}]}'
 ```
 
+An approval also has to cover the branch head: a stale `APPROVED` from an
+earlier commit satisfies nothing once new commits are pushed without
+re-review. Compare the approving review against the head before trusting it:
+
+```bash
+export HEAD=$(gh pr view <N> --repo prog893/treecheck --json headRefOid --jq .headRefOid)
+gh api "repos/prog893/treecheck/pulls/<N>/reviews?per_page=100" \
+  --jq '[.[] | select(.user.login == "coderabbitai[bot]"
+      and .state == "APPROVED" and .commit_id == $ENV.HEAD)] | length'
+# 0 means no approval covering the current head: do not merge yet
+```
+
+(Here the login is written exactly as the REST API returns it; this check
+never runs through `gh pr view`, where the bare name applies.)
+
 Quirks that have cost real time on this repo:
 
 - **The login is `coderabbitai[bot]`, not `coderabbitai`.** A `gh api` filter
@@ -135,10 +150,10 @@ Quirks that have cost real time on this repo:
   fi
   ```
 
-  Note that `gh api --slurp` refuses to combine with `--jq`, so collecting all
-  pages through one jq process is not available here; the filter above runs per
-  page and the TSV lines are sorted afterwards. ISO timestamps sort correctly
-  as text.
+  Note that `gh api --slurp` refuses to combine with its built-in `--jq`
+  (though slurped output can still be piped to an external `jq` process, at
+  the cost of depending on one); the filter above runs per page and the TSV
+  lines are sorted afterwards. ISO timestamps sort correctly as text.
 
 - **Argue when it is wrong.** It verifies and withdraws findings that do not
   hold up, but only against evidence: a measurement, a reproduction, or a
