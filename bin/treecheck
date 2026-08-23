@@ -52,7 +52,7 @@ EOF
     exit "${1:-1}"
 }
 
-error() { echo -e "${RED}ERROR: $@${NC}" >&2; }
+error() { echo -e "${RED}ERROR: $*${NC}" >&2; }
 
 FILE_LIST="" FIND_ERR=""
 cleanup_tmp() {
@@ -61,7 +61,7 @@ cleanup_tmp() {
     return 0
 }
 trap cleanup_tmp EXIT
-success() { echo -e "${GREEN}✓ $@${NC}"; }
+success() { echo -e "${GREEN}✓ $*${NC}"; }
 
 # Prints the hash on success. Returns non-zero if the file could not be read,
 # which a pipeline into awk would otherwise hide.
@@ -73,7 +73,11 @@ compute_hash() {
 
 # Status: 0 verified, 1 mismatch, 2 no usable sidecar, 3 I/O error
 verify_file_hash() {
-    local file="$1" hash_file="${file}${HASH_EXT}"
+    # hash_file must be its own statement: in one combined "local", ${file}
+    # still holds the CALLER'S value, so the sidecar path silently resolved
+    # through whatever global "file" happened to be lying around.
+    local file="$1"
+    local hash_file="${file}${HASH_EXT}"
     local stored_hash current_hash
 
     if [ ! -f "$hash_file" ]; then
@@ -108,7 +112,11 @@ verify_file_hash() {
 
 # Returns status code and message
 create_file_hash() {
-    local file="$1" hash_file="${file}${HASH_EXT}"
+    # hash_file must be its own statement: in one combined "local", ${file}
+    # still holds the CALLER'S value, so the sidecar path silently resolved
+    # through whatever global "file" happened to be lying around.
+    local file="$1"
+    local hash_file="${file}${HASH_EXT}"
     local current_hash
 
     # If hash exists and not forced, only verify if not empty
