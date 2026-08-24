@@ -251,9 +251,10 @@ hash_worker() {
     return 0
 }
 
-# Hash FILE_LIST across $JOBS workers. Results land in one file as records,
-# are sorted back into walk order, and replayed so the output is identical
-# to what the sequential engine prints, whatever order the workers finish in.
+# Hash FILE_LIST across $JOBS workers. Each result lands in its own
+# index-named file under RESULTS_DIR; replay walks the indices in order, so
+# the output is identical to what the sequential engine prints, whatever
+# order the workers finish in.
 parallel_process_files() {
     local mode="$1"
     RESULTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary directory"; exit 1; }
@@ -539,16 +540,7 @@ while [[ $# -gt 0 ]]; do
             MAXDEPTH="$2"; shift 2 ;;
         --no-verify) NO_VERIFY=1; shift ;;
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
-        --jobs|-j)
-            case "${2:-}" in
-                ''|*[!0-9]*) error "--jobs needs a positive integer, got: ${2:-<missing>}"; exit 1 ;;
-                # All-zero strings like 00 parse as zero and would silently
-                # re-enter automatic selection; a positive integer has a
-                # nonzero digit somewhere.
-                *[1-9]*) : ;;
-                *) error "--jobs needs a positive integer, got: $2"; exit 1 ;;
-            esac
-            JOBS="$2"; shift 2 ;;
+        --jobs|-j) validate_jobs "$1" "${2:-}" || exit 1; JOBS="$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
         -h|--help) usage 0 ;;
         --*) error "Unknown option: $1"; usage ;;
@@ -573,17 +565,26 @@ while [[ $# -gt 0 ]]; do
         done
         shift
         if [ -n "${JOBS_PENDING:-}" ]; then
-            case "${1:-}" in
-                ''|*[!0-9]*) error "--jobs needs a positive integer, got: ${1:-<missing>}"; exit 1 ;;
-                *[1-9]*) : ;;
-                *) error "--jobs needs a positive integer, got: $1"; exit 1 ;;
-            esac
+            validate_jobs "-j" "${1:-}" || exit 1
             JOBS="$1"; shift
             JOBS_PENDING=""
         fi ;;
         *) TARGET_DIR="$1"; shift ;;
     esac
 done
+
+# Shared by the standalone and bundled -j forms; reports whichever spelling
+# the caller used.
+validate_jobs() {
+    local opt="$1" val="$2"
+    # All-zero strings like 00 parse as zero and would silently re-enter
+    # automatic selection, so a positive integer must hold a nonzero digit.
+    case "$val" in
+        ''|*[!0-9]*) error "$opt needs a positive integer, got: ${val:-<missing>}"; return 1 ;;
+        *[1-9]*) : ;;
+        *) error "$opt needs a positive integer, got: $val"; return 1 ;;
+    esac
+}
 
 # Validate and run
 [ -z "$TARGET_DIR" ] && { error "No directory specified"; usage; }
