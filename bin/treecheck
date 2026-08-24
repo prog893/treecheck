@@ -80,6 +80,8 @@ cleanup_tmp() {
     [ -n "${DONE_LOG:-}" ] && rm -f "$DONE_LOG"
     [ -n "${MONBUF:-}" ] && rm -f "$MONBUF"
     [ -n "${ACTIVE:-}" ] && rm -f "$ACTIVE"
+    [ -n "${STREAMED_LOG:-}" ] && rm -f "$STREAMED_LOG"
+    [ -n "${NEEDS_PRINT:-}" ] && rm -f "$NEEDS_PRINT"
     return 0
 }
 trap cleanup_tmp EXIT
@@ -272,7 +274,12 @@ hash_worker() {
     printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out" \
         > "$RESULTS_DIR/$i"
     if [ -n "${DONE_LOG:-}" ]; then
-        printf '%s\n' "$i" >> "$DONE_LOG"
+        # A lost event means the live view skips this verdict; the ordered
+        # replay detects that and prints it at the end, so the failure must
+        # be visible but must not discard the result itself.
+        if ! printf '%s\n' "$i" 2>/dev/null >> "$DONE_LOG"; then
+            echo "treecheck: could not record the completion event; this verdict will appear in walk order instead of live" >&2
+        fi
     fi
     return 0
 }
@@ -282,6 +289,26 @@ hash_worker() {
 # of the total, elapsed time, and what is currently being hashed. Completions
 # arrive in whatever order the workers finish; strict walk order is a
 # property of the piped output, not of a live view.
+# Emit the leading complete lines of what arrived in $1 since byte $2 and
+# set CONSUMED to the bytes they occupy. A concurrent append can be cut
+# mid-line; the partial tail stays unread until it is complete.
+consume_new() {
+    local size lastb
+    size=$(wc -c < "$1")
+    if [ "$size" -le "$2" ]; then CONSUMED=0; return 0; fi
+    tail -c +"$(($2+1))" "$1" > "$MONBUF"
+    size=$(wc -c < "$MONBUF")
+    if [ "$size" -eq 0 ]; then CONSUMED=0; return 0; fi
+    lastb=$(tail -c 1 "$MONBUF" | od -An -n -tu1 | tr -d ' \t')
+    if [ "$lastb" != "10" ]; then
+        CONSUMED=$(awk '{ n += length($0) + 1 } END { print n + 0 }' "$MONBUF")
+        head -c "$CONSUMED" "$MONBUF" > "$MONBUF.part" && mv "$MONBUF.part" "$MONBUF"
+    else
+        CONSUMED=$size
+    fi
+    cat "$MONBUF"
+}
+
 progress_monitor() {
     local total="$1" xpid="$2"
     # Both event logs are consumed through byte offsets, so each tick pays
@@ -290,19 +317,22 @@ progress_monitor() {
     # appended as they arrive, completed ones are filtered out, and its
     # size never exceeds the number of workers actually mid-file.
     local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
-    local dsz isz inflight rate pct
+    local inflight rate pct STREAMED_LOG
+    STREAMED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || return 1
+    export STREAMED_LOG
     while kill -0 "$xpid" 2>/dev/null; do
-        isz=$(wc -c < "$INFLIGHT")
-        if [ "$isz" -gt "$ioff" ]; then
-            tail -c +"$((ioff+1))" "$INFLIGHT" >> "$ACTIVE"
-            ioff=$isz
+        consume_new "$INFLIGHT" "$ioff"
+        if [ "$CONSUMED" -gt 0 ]; then
+            ioff=$((ioff+CONSUMED))
+            cat "$MONBUF" >> "$ACTIVE"
         fi
-        dsz=$(wc -c < "$DONE_LOG")
-        if [ "$dsz" -gt "$doff" ]; then
-            tail -c +"$((doff+1))" "$DONE_LOG" > "$MONBUF"
+        consume_new "$DONE_LOG" "$doff"
+        if [ "$CONSUMED" -gt 0 ]; then
+            doff=$((doff+CONSUMED))
             while IFS= read -r idx; do
                 [ -n "$idx" ] || continue
                 done=$((done+1))
+                printf '%s\n' "$idx" >> "$STREAMED_LOG"
                 # The completed index leaves the active set; grep finding
                 # nothing is not an error here.
                 grep -v "^${idx}"$'\t' "$ACTIVE" \
@@ -314,7 +344,6 @@ progress_monitor() {
                     printf '\r\033[K%s\n' "$line"
                 fi
             done < "$MONBUF"
-            doff=$dsz
         fi
         inflight=$(tail -n 3 "$ACTIVE" | cut -f2 | sed 's#.*/##' \
             | paste -s -d ', ' -)
@@ -329,11 +358,11 @@ progress_monitor() {
         sleep 0.5
     done
     # Final drain for events that landed between the last poll and exit.
-    dsz=$(wc -c < "$DONE_LOG")
-    if [ "$dsz" -gt "$doff" ]; then
-        tail -c +"$((doff+1))" "$DONE_LOG" > "$MONBUF"
+    consume_new "$DONE_LOG" "$doff"
+    if [ "$CONSUMED" -gt 0 ]; then
         while IFS= read -r idx; do
             [ -n "$idx" ] || continue
+            printf '%s\n' "$idx" >> "$STREAMED_LOG"
             if [ -s "$RESULTS_DIR/$idx" ]; then
                 IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
                 line=${line//$'\001'/$'\n'}
@@ -367,12 +396,13 @@ parallel_process_files() {
 
     WORKER_MODE="$mode"
     STREAMED=0
-    INFLIGHT="" DONE_LOG="" MONBUF="" ACTIVE=""
+    INFLIGHT="" DONE_LOG="" MONBUF="" ACTIVE="" STREAMED_LOG="" NEEDS_PRINT=""
     if [ -t 1 ]; then
         INFLIGHT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         DONE_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         MONBUF=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         ACTIVE=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+        NEEDS_PRINT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         STREAMED=1
     fi
     export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG
@@ -413,7 +443,7 @@ parallel_process_files() {
     if [ "$TOTAL_FILES" -gt 0 ]; then
         if [ "$STREAMED" -eq 1 ]; then
             xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
-                < "$WORK_INPUT" >/dev/null 2>/dev/null &
+                < "$WORK_INPUT" >/dev/null &
             XPID=$!
             progress_monitor "$TOTAL_FILES" "$XPID"
             wait "$XPID" || { error "parallel hashing failed"; exit 1; }
@@ -425,8 +455,18 @@ parallel_process_files() {
 
     # Replay walks the indices in order, so ordering needs no sort and a
     # missing or empty result is named precisely instead of shifting every
-    # verdict after it.
-    local i rc line event_failures=0
+    # verdict after it. On an interactive terminal the monitor already
+    # displayed its share; the indices it missed are printed here so every
+    # verdict reaches the user exactly once.
+    local i rc line event_failures=0 NP_NEXT=""
+    if [ "$STREAMED" -eq 1 ] && [ -s "$STREAMED_LOG" ]; then
+        awk 'NR==FNR { s[$1]; next } !($1 in s) { print }' \
+            "$STREAMED_LOG" <(seq 0 $((TOTAL_FILES-1))) > "$NEEDS_PRINT"
+        if [ -s "$NEEDS_PRINT" ]; then
+            exec 3< "$NEEDS_PRINT"
+            IFS= read -r -u 3 NP_NEXT || NP_NEXT=""
+        fi
+    fi
     for (( expected=0; expected<TOTAL_FILES; expected++ )); do
         # A path containing a newline would split its record and shift every
         # index after it; a tab would shift one record's fields past
@@ -457,10 +497,14 @@ parallel_process_files() {
             *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
         esac
         line=${line//$'\001'/$'\n'}
-        # On an interactive terminal the monitor already streamed these as
-        # they completed; a pipe gets every verdict here in walk order.
+        # On an interactive terminal the monitor streamed most verdicts as
+        # they completed; the ones whose progress event was lost appear here,
+        # in walk order, exactly once each. A pipe gets every verdict.
         if [ "$STREAMED" -eq 0 ]; then
             echo "$line"
+        elif [ -n "$NP_NEXT" ] && [ "$expected" = "$NP_NEXT" ]; then
+            echo "$line"
+            if IFS= read -r -u 3 NP_NEXT; then :; else NP_NEXT=""; fi
         fi
         case $rc in
             0) CNT_OK=$((CNT_OK+1)) ;;
@@ -481,6 +525,7 @@ parallel_process_files() {
         esac
         CNT_SCANNED=$((CNT_SCANNED+1))
     done
+    exec 3<&- 2>/dev/null
 
     # Creation events arrived through the log, not through records. Status-6
     # creations never made it into the log, so their count is added back.
