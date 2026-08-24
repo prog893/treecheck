@@ -309,7 +309,6 @@ parallel_process_files() {
     sort -n "$RESULTS" > "$SORTED" || { error "could not order results"; exit 1; }
 
     local i rc line expected=0 event_failures=0
-    CNT_UNVERIFIED_AFTER_EVENT_FAIL=0
     while IFS=$'\t' read -r i rc line; do
         # A path containing a newline would split its record and shift every
         # index after it; a tab would shift one record's fields past
@@ -374,6 +373,7 @@ process_files() {
     local mode="$1" skipped=0
     local find_expr=()
     CNT_SCANNED=0 CNT_OK=0 CNT_MISMATCH=0 CNT_MISSING=0 CNT_IOERR=0 CNT_CREATED=0 CNT_UNVERIFIED=0
+    CNT_UNVERIFIED_AFTER_EVENT_FAIL=0
 
     # Build find expression.
     #
