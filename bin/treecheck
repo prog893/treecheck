@@ -82,6 +82,7 @@ cleanup_tmp() {
     [ -n "${ACTIVE:-}" ] && rm -f "$ACTIVE"
     [ -n "${STREAMED_LOG:-}" ] && rm -f "$STREAMED_LOG"
     [ -n "${NEEDS_PRINT:-}" ] && rm -f "$NEEDS_PRINT"
+    [ -n "${ALL_IDX:-}" ] && rm -f "$ALL_IDX"
     return 0
 }
 trap cleanup_tmp EXIT
@@ -399,7 +400,7 @@ parallel_process_files() {
 
     WORKER_MODE="$mode"
     STREAMED=0
-    INFLIGHT="" DONE_LOG="" MONBUF="" ACTIVE="" STREAMED_LOG="" NEEDS_PRINT=""
+    INFLIGHT="" DONE_LOG="" MONBUF="" ACTIVE="" STREAMED_LOG="" NEEDS_PRINT="" ALL_IDX=""
     STREAMED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     if [ -t 1 ]; then
         INFLIGHT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
@@ -407,6 +408,7 @@ parallel_process_files() {
         MONBUF=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         ACTIVE=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         NEEDS_PRINT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+        ALL_IDX=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         STREAMED=1
     fi
     export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG
@@ -462,10 +464,22 @@ parallel_process_files() {
     # verdict after it. On an interactive terminal the monitor already
     # displayed its share; the indices it missed are printed here so every
     # verdict reaches the user exactly once.
-    local i rc line event_failures=0 NP_NEXT=""
+    local i rc line event_failures=0 NP_NEXT="" idxgen=0
     if [ "$STREAMED" -eq 1 ] && [ -s "$STREAMED_LOG" ]; then
-        awk 'NR==FNR { s[$1]; next } !($1 in s) { print }' \
-            "$STREAMED_LOG" <(seq 0 $((TOTAL_FILES-1))) > "$NEEDS_PRINT"
+        # The full index range is generated in a regular file by a loop whose
+        # failure is checked: an empty range here would silently suppress
+        # every fallback verdict.
+        : > "$ALL_IDX"
+        while [ "$idxgen" -lt "$TOTAL_FILES" ]; do
+            printf '%s\n' "$idxgen" >> "$ALL_IDX"
+            idxgen=$((idxgen+1))
+        done
+        if ! awk 'NR==FNR { s[$1]; next } !($1 in s) { print }' \
+                "$STREAMED_LOG" "$ALL_IDX" > "$NEEDS_PRINT"; then
+            error "could not determine which verdicts the live view missed"
+            exit 1
+        fi
+        rm -f "$ALL_IDX"
         if [ -s "$NEEDS_PRINT" ]; then
             exec 3< "$NEEDS_PRINT"
             IFS= read -r -u 3 NP_NEXT || NP_NEXT=""
