@@ -362,7 +362,7 @@ parallel_process_files() {
         CNT_CREATED=$((CNT_CREATED+event_failures))
     fi
     if [ $event_failures -gt 0 ]; then
-        error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count above still includes them"
+        error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count in the summary below still includes them"
     fi
 
     if [ "$CNT_SCANNED" -ne "$TOTAL_FILES" ]; then
@@ -545,10 +545,27 @@ while [[ $# -gt 0 ]]; do
                 n) NO_VERIFY=1 ;;
                 V) echo "treecheck $VERSION"; exit 0 ;;
                 v) VERBOSE=1 ;;
+                # -j takes a value, so it must end the bundle; the number is
+                # consumed from the next argument below.
+                j)
+                    if [ $((i+1)) -lt ${#1} ]; then
+                        error "-j takes the worker count as a separate argument"
+                        usage
+                    fi
+                    JOBS_PENDING=1 ;;
                 *) error "Unknown: -${1:$i:1}"; usage ;;
             esac
         done
-        shift ;;
+        shift
+        if [ -n "${JOBS_PENDING:-}" ]; then
+            case "${1:-}" in
+                ''|*[!0-9]*) error "--jobs needs a positive integer, got: ${1:-<missing>}"; exit 1 ;;
+                *[1-9]*) : ;;
+                *) error "--jobs needs a positive integer, got: $1"; exit 1 ;;
+            esac
+            JOBS="$1"; shift
+            JOBS_PENDING=""
+        fi ;;
         *) TARGET_DIR="$1"; shift ;;
     esac
 done
