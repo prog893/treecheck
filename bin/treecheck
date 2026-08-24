@@ -49,7 +49,7 @@ EXAMPLES:
   treecheck -cn /Volumes/Media               Create only, skip verification
   treecheck --no-recurse /Volumes/Media      Top level only
   treecheck -e "temp,cache" /Volumes/Media   Skip those directories
-    treecheck --strict /Volumes/Media          Missing sidecars are failures too
+  treecheck --strict /Volumes/Media          Missing sidecars are failures too
 EOF
     exit "${1:-1}"
 }
