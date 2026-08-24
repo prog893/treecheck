@@ -182,12 +182,14 @@ create_file_hash() {
     # travels there instead. The sequential engine never sets the
     # variable and keeps this counter as its source of truth.
     if [ -n "${CREATED_LOG:-}" ]; then
-        # A lost event would make the parallel summary undercount creations
-        # while printing a clean bill, which is the one species of lie this
-        # tool refuses. Fail this file like an unwritable sidecar instead.
+        # The sidecar exists whether or not its event lands, so this failure
+        # must not hide the creation. Status 6 tells the replay to count it
+        # as both created and unverified and to warn loudly afterwards,
+        # which keeps the engines agreeing on Created without ever printing
+        # a read-back verdict that never happened.
         if ! printf '%s\n' "$file" >> "$CREATED_LOG" 2>/dev/null; then
             echo "cannot record creation event!"
-            return 5
+            return 6
         fi
     fi
     echo "sidecar created!"
@@ -304,7 +306,7 @@ parallel_process_files() {
 
     sort -n "$RESULTS" > "$SORTED" || { error "could not order results"; exit 1; }
 
-    local i rc line expected=0
+    local i rc line expected=0 event_failures=0
     while IFS=$'\t' read -r i rc line; do
         # A path containing a newline would split its record and shift every
         # index after it; a tab would shift one record's fields past
@@ -319,7 +321,7 @@ parallel_process_files() {
             exit 1
         fi
         case $rc in
-            0|1|2|3|4|5) : ;;
+            0|1|2|3|4|5|6) : ;;
             *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
         esac
         expected=$((expected+1))
@@ -334,6 +336,12 @@ parallel_process_files() {
             # A sidecar whose write failed is an I/O error like an unreadable
             # source; the distinct code exists only so creation is not counted.
             5) CNT_IOERR=$((CNT_IOERR+1)) ;;
+            # Written but its creation event could not be recorded: still a
+            # creation, and no read-back happened, so it counts as neither
+            # verified nor I/O-lost.
+            6) CNT_CREATED=$((CNT_CREATED+1))
+               CNT_UNVERIFIED=$((CNT_UNVERIFIED+1))
+               event_failures=$((event_failures+1)) ;;
         esac
         CNT_SCANNED=$((CNT_SCANNED+1))
     done < "$SORTED"
@@ -341,6 +349,9 @@ parallel_process_files() {
     # Creation events arrived through the log, not through records.
     if [ "$mode" = "create" ]; then
         CNT_CREATED=$(wc -l < "$CREATED_LOG" | tr -d ' ')
+    fi
+    if [ $event_failures -gt 0 ]; then
+        error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count above still includes them"
     fi
 
     if [ "$CNT_SCANNED" -ne "$TOTAL_FILES" ]; then
