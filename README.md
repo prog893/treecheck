@@ -110,6 +110,12 @@ elapsed time, and what is currently being hashed. Piped or redirected output
 carries none of that - every verdict appears exactly once, in walk order,
 with no control characters, so it can go through `grep` or into a log.
 
+## Parallel output
+
+The interactive status line exists only on a terminal. It never appears in
+piped or redirected output, which carries exactly what parallel hashing has
+always carried: one verdict per file in walk order.
+
 ## How it works
 
 For `video.mxf`, `treecheck` writes `video.mxf.sha256` containing that file's SHA-256 digest. On a later run it re-hashes `video.mxf` and compares.

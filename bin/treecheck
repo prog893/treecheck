@@ -79,6 +79,7 @@ cleanup_tmp() {
     [ -n "${INFLIGHT:-}" ] && rm -f "$INFLIGHT"
     [ -n "${DONE_LOG:-}" ] && rm -f "$DONE_LOG"
     [ -n "${MONBUF:-}" ] && rm -f "$MONBUF"
+    [ -n "${ACTIVE:-}" ] && rm -f "$ACTIVE"
     return 0
 }
 trap cleanup_tmp EXIT
@@ -283,30 +284,40 @@ hash_worker() {
 # property of the piped output, not of a live view.
 progress_monitor() {
     local total="$1" xpid="$2"
-    local off=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
-    local inflight rate pct
+    # Both event logs are consumed through byte offsets, so each tick pays
+    # only for events that arrived since the last one. The active set is
+    # maintained incrementally for the same reason: started entries are
+    # appended as they arrive, completed ones are filtered out, and its
+    # size never exceeds the number of workers actually mid-file.
+    local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
+    local dsz isz inflight rate pct
     while kill -0 "$xpid" 2>/dev/null; do
-        if [ -s "$DONE_LOG" ]; then
-            local sz
-            sz=$(wc -c < "$DONE_LOG")
-            if [ "$sz" -gt "$off" ]; then
-                tail -c +"$((off+1))" "$DONE_LOG" > "$MONBUF"
-                while IFS= read -r idx; do
-                    [ -n "$idx" ] || continue
-                    done=$((done+1))
-                    if [ -s "$RESULTS_DIR/$idx" ]; then
-                        IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
-                        line=${line//$'\001'/$'\n'}
-                        printf '\r\033[K%s\n' "$line"
-                    fi
-                done < "$MONBUF"
-                off=$sz
-            fi
+        isz=$(wc -c < "$INFLIGHT")
+        if [ "$isz" -gt "$ioff" ]; then
+            tail -c +"$((ioff+1))" "$INFLIGHT" >> "$ACTIVE"
+            ioff=$isz
         fi
-        # In-flight names: started minus completed, most recent last.
-        inflight=$(awk -F'\t' 'NR==FNR { c[$1]; next } !($1 in c) { print $2 }' \
-            "$DONE_LOG" "$INFLIGHT" 2>/dev/null | tail -n 3 \
-            | sed 's#.*/##' | paste -s -d ', ' -)
+        dsz=$(wc -c < "$DONE_LOG")
+        if [ "$dsz" -gt "$doff" ]; then
+            tail -c +"$((doff+1))" "$DONE_LOG" > "$MONBUF"
+            while IFS= read -r idx; do
+                [ -n "$idx" ] || continue
+                done=$((done+1))
+                # The completed index leaves the active set; grep finding
+                # nothing is not an error here.
+                grep -v "^${idx}"$'\t' "$ACTIVE" \
+                    > "$ACTIVE.new" 2>/dev/null || true
+                mv "$ACTIVE.new" "$ACTIVE"
+                if [ -s "$RESULTS_DIR/$idx" ]; then
+                    IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
+                    line=${line//$'\001'/$'\n'}
+                    printf '\r\033[K%s\n' "$line"
+                fi
+            done < "$MONBUF"
+            doff=$dsz
+        fi
+        inflight=$(tail -n 3 "$ACTIVE" | cut -f2 | sed 's#.*/##' \
+            | paste -s -d ', ' -)
         rate=0
         [ $((SECONDS-start)) -gt 0 ] && rate=$((done/(SECONDS-start)))
         pct=0
@@ -317,22 +328,18 @@ progress_monitor() {
         spin=$((spin+1))
         sleep 0.5
     done
-    # Final drain for records that landed between the last poll and exit.
-    if [ -s "$DONE_LOG" ]; then
-        local sz
-        sz=$(wc -c < "$DONE_LOG")
-        if [ "$sz" -gt "$off" ]; then
-            tail -c +"$((off+1))" "$DONE_LOG" > "$MONBUF"
-            while IFS= read -r idx; do
-                [ -n "$idx" ] || continue
-                done=$((done+1))
-                if [ -s "$RESULTS_DIR/$idx" ]; then
-                    IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
-                    line=${line//$'\001'/$'\n'}
-                    printf '\r\033[K%s\n' "$line"
-                fi
-            done < "$MONBUF"
-        fi
+    # Final drain for events that landed between the last poll and exit.
+    dsz=$(wc -c < "$DONE_LOG")
+    if [ "$dsz" -gt "$doff" ]; then
+        tail -c +"$((doff+1))" "$DONE_LOG" > "$MONBUF"
+        while IFS= read -r idx; do
+            [ -n "$idx" ] || continue
+            if [ -s "$RESULTS_DIR/$idx" ]; then
+                IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
+                line=${line//$'\001'/$'\n'}
+                printf '\r\033[K%s\n' "$line"
+            fi
+        done < "$MONBUF"
     fi
     printf '\r\033[K'
 }
@@ -360,11 +367,12 @@ parallel_process_files() {
 
     WORKER_MODE="$mode"
     STREAMED=0
-    INFLIGHT="" DONE_LOG="" MONBUF=""
+    INFLIGHT="" DONE_LOG="" MONBUF="" ACTIVE=""
     if [ -t 1 ]; then
         INFLIGHT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         DONE_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         MONBUF=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+        ACTIVE=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         STREAMED=1
     fi
     export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG
