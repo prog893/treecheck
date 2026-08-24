@@ -1,9 +1,13 @@
 # treecheck Development Guide
 
-A single POSIX-ish bash script at `bin/treecheck`. No build step, no
-dependencies beyond `bash` and the standard userland it calls: `find`,
-`shasum`, `tr`, `sed`, `rm`, `mktemp`. Anything a minimal container strips
-beyond those is a real portability break.
+A single POSIX-ish bash script at `bin/treecheck`. No build step. The core
+set is `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`, `mktemp`, `wc`;
+parallel hashing adds an `xargs` built with `-P` support, which
+is common but not POSIX. Worker-count auto-detection consults `sysctl` or
+`nproc` and falls back to 1 without either. When `-j 1` is chosen
+explicitly, only the core set runs. Anything a minimal container strips
+beyond those is a real portability break, and the parallel engine probes
+for `-P` before dispatching instead of failing mid-walk.
 
 ## What this tool promises
 
@@ -39,6 +43,8 @@ fixture holding **all** outcome categories at once:
 | unreadable **hidden** dir (`.Trashes`) | pruned, no error |
 | unreadable **non-hidden** dir | walk fails, exit 1 |
 | create-only run over a fresh tree (`-c -n`) | counted as `Not verified`, never as `Verified` |
+| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`), identical exit status |
+| path containing a newline or `0x01` under `-j > 1` | refused before any hashing, exit 1, message names `-j 1` |
 
 Confirm exit status every time, since it is a documented interface:
 

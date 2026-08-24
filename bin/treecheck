@@ -3,7 +3,7 @@
 # NVMe integrity checker - creates/verifies SHA-256 sidecar files
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # Config
 HASH_EXT=".sha256"
@@ -12,6 +12,7 @@ FORCE=0
 NO_VERIFY=0
 STRICT=0
 EXCLUDE_DIRS=()
+JOBS=0   # 0 = auto: one worker per CPU
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -29,6 +30,7 @@ OPTIONS:
   -f              Overwrite existing sidecars (use with -c)
   -n              Skip verification (create only; requires -c)
   -e DIRS         Exclude directories, comma-separated
+  -j N, --jobs N  Hash across N parallel workers (default: one per CPU)
   -v              Verbose (report skipped files)
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
@@ -54,10 +56,26 @@ EOF
 
 error() { echo -e "${RED}ERROR: $*${NC}" >&2; }
 
-FILE_LIST="" FIND_ERR=""
+# Shared by the standalone and bundled -j forms; reports whichever spelling
+# the caller used.
+validate_jobs() {
+    local opt="$1" val="$2"
+    # All-zero strings like 00 parse as zero and would silently re-enter
+    # automatic selection, so a positive integer must hold a nonzero digit.
+    case "$val" in
+        ''|*[!0-9]*) error "$opt needs a positive integer, got: ${val:-<missing>}"; return 1 ;;
+        *[1-9]*) : ;;
+        *) error "$opt needs a positive integer, got: $val"; return 1 ;;
+    esac
+}
+
+FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT=""
 cleanup_tmp() {
     [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST"
     [ -n "$FIND_ERR" ] && rm -f "$FIND_ERR" "$FIND_ERR.all"
+    [ -n "$RESULTS_DIR" ] && rm -rf "$RESULTS_DIR"
+    [ -n "$WORK_INPUT" ] && rm -f "$WORK_INPUT"
+    [ -n "${CREATED_LOG:-}" ] && rm -f "$CREATED_LOG"
     return 0
 }
 trap cleanup_tmp EXIT
@@ -157,11 +175,37 @@ create_file_hash() {
         echo "unreadable!"
         return 3
     fi
-    if ! echo "$current_hash" > "$hash_file" 2>/dev/null; then
+    # The write's stderr stays silent: bash would otherwise interleave its own
+    # "Permission denied" diagnostic with a shell-specific prefix (the two
+    # engines run under different parents), and the message below already says
+    # what happened in this tool's words. Redirecting stderr BEFORE the target
+    # matters: once the failing redirect is reached, stderr must already be
+    # somewhere harmless or the diagnostic escapes anyway.
+    if ! echo "$current_hash" 2>/dev/null > "$hash_file"; then
         echo "cannot write sidecar!"
-        return 3
+        # Distinct from the read-failure status on purpose: parallel workers
+        # need to know the write itself failed, so creation is not counted
+        # for a sidecar that never landed. Both engines map it to I/O errors.
+        return 5
     fi
     CNT_CREATED=$((CNT_CREATED+1))
+    # A parallel worker runs this in a subshell and cannot mutate the
+    # parent's counters, so when a creation log is wired up the event
+    # travels there instead. The sequential engine never sets the
+    # variable and keeps this counter as its source of truth.
+    if [ -n "${CREATED_LOG:-}" ]; then
+        # The sidecar exists whether or not its event lands, so this failure
+        # must not hide the creation. Status 6 tells the replay to count it
+        # as both created and unverified and to warn loudly afterwards,
+        # which keeps the engines agreeing on Created without ever printing
+        # a read-back verdict that never happened.
+        # stderr redirected before the target so a failed redirect cannot
+        # leak the shell's own diagnostic past the suppression.
+        if ! printf '%s\n' "$file" 2>/dev/null >> "$CREATED_LOG"; then
+            echo "cannot record creation event!"
+            return 6
+        fi
+    fi
     echo "sidecar created!"
 
     # Verify newly created hash unless NO_VERIFY is set
@@ -191,10 +235,177 @@ create_file_hash() {
     return 4
 }
 
+# One unit of parallel work. Emits a single tab-separated record:
+#   written to RESULTS_DIR/<index>; one file per record, no shared appends
+# The status codes are data here, not exit codes: the worker always exits 0
+# so that xargs does not mistake an ordinary corrupt file for a broken run.
+# Creation events travel out of band: create_file_hash appends them to
+# $CREATED_LOG when the parallel engine wires one up, because a subshell
+# cannot mutate the parent's counters and inferring the event from pre-call
+# state or final status gets both the unreadable-source case and the
+# empty-sidecar rewrite wrong.
+hash_worker() {
+    local i="$1" f="$2" out rc
+    if [ "$WORKER_MODE" = "create" ]; then
+        out=$(create_file_hash "$f" 2>&1); rc=$?
+    else
+        out=$(verify_file_hash "$f" 2>&1); rc=$?
+    fi
+    # One record must be one physical line: create mode legitimately prints
+    # two (the creation report, then the read-back verdict), so newlines
+    # travel escaped and are restored just before display.
+    out=${out//$'\n'/$'\001'}
+    # Each result lands in its own index-named file. Appending to one shared
+    # file is only collision-free while every write stays under the stdio
+    # buffer size, and a deep path plus a mismatch diagnostic can exceed
+    # that; interleaved halves would corrupt the stream.
+    printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out" \
+        > "$RESULTS_DIR/$i"
+    return 0
+}
+
+# Hash FILE_LIST across $JOBS workers. Each result lands in its own
+# index-named file under RESULTS_DIR; replay walks the indices in order, so
+# the output is identical to what the sequential engine prints, whatever
+# order the workers finish in.
+parallel_process_files() {
+    local mode="$1"
+    RESULTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary directory"; exit 1; }
+    WORK_INPUT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    CREATED_LOG=""
+    if [ "$mode" = "create" ]; then
+        CREATED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    fi
+
+    # The parallel engine needs xargs -P, which is common but not part of
+    # POSIX xargs. Probe once up front instead of dying mid-walk.
+    if ! printf 'ok\n' | xargs -P 1 -n1 true 2>/dev/null; then
+        error "this xargs cannot run parallel workers (-P unsupported)"
+        error "rerun with -j 1"
+        exit 1
+    fi
+
+    WORKER_MODE="$mode"
+    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR
+    export -f hash_worker verify_file_hash create_file_hash compute_hash
+
+    echo "Hashing with $JOBS parallel workers..."
+
+    # Index and path travel as two NUL-separated arguments per worker. The
+    # enumeration runs against a file, not a pipeline: inside `while | xargs`
+    # the loop is a subshell and its counter never comes back, which would
+    # silently report zero dispatched files.
+    local idx=0
+    while IFS= read -r -d '' f; do
+        f="$TARGET_DIR/${f#./}"
+        case $f in
+            # Newlines split the record stream and \x01 is the escape byte
+            # for multi-line verdicts, so neither may travel inside a path.
+            # Both are refused before any hashing starts; -j 1 handles them.
+            *$'\n'*)
+                error "cannot hash in parallel: path contains a newline: $f"
+                error "rerun with -j 1"
+                exit 1 ;;
+            *$'\001'*)
+                error "cannot hash in parallel: path contains a 0x01 byte: $f"
+                error "rerun with -j 1"
+                exit 1 ;;
+        esac
+        printf '%s\0%s\0' "$idx" "$f"
+        idx=$((idx+1))
+    done < "$FILE_LIST" > "$WORK_INPUT"
+    TOTAL_FILES=$idx
+
+    # xargs is guarded against empty input because GNU and BSD disagree on
+    # whether an empty list still runs the command once.
+    if [ "$TOTAL_FILES" -gt 0 ]; then
+        xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
+            < "$WORK_INPUT" >/dev/null || { error "parallel hashing failed"; exit 1; }
+    fi
+
+    # Replay walks the indices in order, so ordering needs no sort and a
+    # missing or empty result is named precisely instead of shifting every
+    # verdict after it.
+    local i rc line event_failures=0
+    for (( expected=0; expected<TOTAL_FILES; expected++ )); do
+        # A path containing a newline would split its record and shift every
+        # index after it; a tab would shift one record's fields past
+        # validation. Newline and escape-byte paths are refused before
+        # dispatch, so this guard is the backstop that keeps a corrupted
+        # stream from printing shifted or mislabeled verdicts: a report that
+        # looks right but describes the wrong files is the one failure this
+        # tool must never have. Sequential mode handles such trees correctly.
+        RESULT_FILE="$RESULTS_DIR/$expected"
+        if [ ! -s "$RESULT_FILE" ]; then
+            error "internal: no result arrived for record $expected"
+            error "rerun with -j 1 and report this output"
+            exit 1
+        fi
+        IFS=$'\t' read -r i rc line < "$RESULT_FILE" || {
+            error "internal: could not read result for record $expected"
+            error "rerun with -j 1 and report this output"
+            exit 1
+        }
+        # Backstop against a record whose index does not match its slot.
+        if [ "$i" != "$expected" ]; then
+            error "internal: record $expected carries index $i"
+            error "rerun with -j 1 and report this output"
+            exit 1
+        fi
+        case $rc in
+            0|1|2|3|4|5|6) : ;;
+            *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
+        esac
+        line=${line//$'\001'/$'\n'}
+        echo "$line"
+        case $rc in
+            0) CNT_OK=$((CNT_OK+1)) ;;
+            1) CNT_MISMATCH=$((CNT_MISMATCH+1)) ;;
+            2) CNT_MISSING=$((CNT_MISSING+1)) ;;
+            3) CNT_IOERR=$((CNT_IOERR+1)) ;;
+            4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
+            # A sidecar whose write failed is an I/O error like an unreadable
+            # source; the distinct code exists only so creation is not counted.
+            5) CNT_IOERR=$((CNT_IOERR+1)) ;;
+            # Written but its creation event could not be recorded: still a
+            # creation, and no read-back happened, so it counts as neither
+            # verified nor I/O-lost.
+            6) CNT_CREATED=$((CNT_CREATED+1))
+               CNT_UNVERIFIED=$((CNT_UNVERIFIED+1))
+               event_failures=$((event_failures+1))
+               CNT_UNVERIFIED_AFTER_EVENT_FAIL=$((CNT_UNVERIFIED_AFTER_EVENT_FAIL+1)) ;;
+        esac
+        CNT_SCANNED=$((CNT_SCANNED+1))
+    done
+
+    # Creation events arrived through the log, not through records. Status-6
+    # creations never made it into the log, so their count is added back.
+    if [ "$mode" = "create" ]; then
+        # Checked alone rather than in a pipeline: the status of this read
+        # must not depend on shell options surviving around it.
+        if ! CREATED_COUNT=$(wc -l < "$CREATED_LOG"); then
+            error "could not read the creation log"
+            exit 1
+        fi
+        CNT_CREATED=${CREATED_COUNT//[[:space:]]/}
+        CNT_CREATED=$((CNT_CREATED+event_failures))
+    fi
+    if [ $event_failures -gt 0 ]; then
+        error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count in the summary below still includes them"
+    fi
+
+    if [ "$CNT_SCANNED" -ne "$TOTAL_FILES" ]; then
+        error "internal: $TOTAL_FILES files were dispatched but $CNT_SCANNED results came back"
+        error "rerun with -j 1 and report this output"
+        exit 1
+    fi
+}
+
 process_files() {
     local mode="$1" skipped=0
     local find_expr=()
     CNT_SCANNED=0 CNT_OK=0 CNT_MISMATCH=0 CNT_MISSING=0 CNT_IOERR=0 CNT_CREATED=0 CNT_UNVERIFIED=0
+    CNT_UNVERIFIED_AFTER_EVENT_FAIL=0
 
     # Build find expression.
     #
@@ -255,7 +466,11 @@ if [ $find_status -ne 0 ]; then
     sed 's/^/  /' < "$FIND_ERR" >&2
 fi
 
-# Process files
+# Process files: parallel engine when more than one worker was asked for,
+# otherwise the original sequential loop, byte for byte.
+if [ "$JOBS" -gt 1 ]; then
+    parallel_process_files "$mode"
+else
 while IFS= read -r -d '' file; do
     CNT_SCANNED=$((CNT_SCANNED+1))
     file="$TARGET_DIR/${file#./}"
@@ -282,8 +497,10 @@ while IFS= read -r -d '' file; do
     2) CNT_MISSING=$((CNT_MISSING+1)) ;;
     3) CNT_IOERR=$((CNT_IOERR+1)) ;;
     4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
+    5) CNT_IOERR=$((CNT_IOERR+1)) ;;
   esac
 done < "$FILE_LIST"
+fi
 
 # Calculate skipped files if verbose
 if [ $VERBOSE -eq 1 ]; then
@@ -303,6 +520,13 @@ echo -e "Mismatched:      ${CNT_MISMATCH}$([ $CNT_MISMATCH -gt 0 ] && echo "   $
 echo "Missing/empty:   $CNT_MISSING"
 echo "I/O errors:      $CNT_IOERR"
 
+# A normal create run promises to read back what it wrote. Status 6 means a
+# sidecar was written but its read-back never happened because bookkeeping
+# failed first, so that run has not kept the promise and must not exit 0.
+# Under -c -n nothing was promised, so the warning alone stands.
+if [ "$NO_VERIFY" -eq 0 ] && [ "$CNT_UNVERIFIED_AFTER_EVENT_FAIL" -gt 0 ]; then
+    return 1
+fi
 if [ $find_status -ne 0 ]; then
     return 1
 elif [ $CNT_MISMATCH -gt 0 ] || [ $CNT_IOERR -gt 0 ]; then
@@ -329,6 +553,7 @@ while [[ $# -gt 0 ]]; do
             MAXDEPTH="$2"; shift 2 ;;
         --no-verify) NO_VERIFY=1; shift ;;
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
+        --jobs|-j) validate_jobs "$1" "${2:-}" || exit 1; JOBS="$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
         -h|--help) usage 0 ;;
         --*) error "Unknown option: $1"; usage ;;
@@ -340,10 +565,23 @@ while [[ $# -gt 0 ]]; do
                 n) NO_VERIFY=1 ;;
                 V) echo "treecheck $VERSION"; exit 0 ;;
                 v) VERBOSE=1 ;;
+                # -j takes a value, so it must end the bundle; the number is
+                # consumed from the next argument below.
+                j)
+                    if [ $((i+1)) -lt ${#1} ]; then
+                        error "-j takes the worker count as a separate argument"
+                        usage
+                    fi
+                    JOBS_PENDING=1 ;;
                 *) error "Unknown: -${1:$i:1}"; usage ;;
             esac
         done
-        shift ;;
+        shift
+        if [ -n "${JOBS_PENDING:-}" ]; then
+            validate_jobs "-j" "${1:-}" || exit 1
+            JOBS="$1"; shift
+            JOBS_PENDING=""
+        fi ;;
         *) TARGET_DIR="$1"; shift ;;
     esac
 done
@@ -351,6 +589,15 @@ done
 # Validate and run
 [ -z "$TARGET_DIR" ] && { error "No directory specified"; usage; }
 [ ! -d "$TARGET_DIR" ] && { error "Directory not found: $TARGET_DIR"; exit 1; }
+
+# Resolve automatic worker count: one per CPU, on either platform.
+if [ "$JOBS" -eq 0 ]; then
+    JOBS=$( { sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1; } )
+    JOBS=${JOBS%%$'\n'*}
+    case "$JOBS" in
+        ''|*[!0-9]*|0) JOBS=1 ;;
+    esac
+fi
 
 # Set default mode
 [ -z "$MODE" ] && MODE="verify"
@@ -373,6 +620,7 @@ else
     echo "Mode: Verify only | Dir: $TARGET_DIR | $SCOPE_DESC"
 fi
 [ ${#EXCLUDE_DIRS[@]:-} -gt 0 ] && echo "Excluding: ${EXCLUDE_DIRS[*]}"
+[ "$JOBS" -gt 1 ] && echo "Workers: $JOBS (parallel hashing)"
     echo
 
     run_status=0

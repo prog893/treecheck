@@ -84,6 +84,7 @@ Exit code 2 keeps "something needs looking at" separate from "you added new file
 -f              Overwrite existing sidecars (use with -c)
 -n              Skip verification (create only; requires -c)
 -e DIRS         Exclude directories, comma-separated
+-j N, --jobs N  Hash across N parallel workers (default: one per CPU)
 -v              Verbose (report skipped files)
 --no-recurse    Only the named directory (same as --max-depth 1)
 --max-depth N   Descend at most N levels
@@ -124,6 +125,12 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 - `bash`
 - `shasum` (standard on macOS and Linux)
 - `find` with `-print0` support
+- standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`
+
+Parallel hashing (the default on multi-core machines) additionally uses an
+`xargs` built with `-P`. That flag is common but not POSIX; where it is
+missing the tool says so up front and `-j 1` always works with the core set
+alone.
 
 ## License
 
