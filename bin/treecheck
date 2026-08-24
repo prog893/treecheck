@@ -187,7 +187,9 @@ create_file_hash() {
         # as both created and unverified and to warn loudly afterwards,
         # which keeps the engines agreeing on Created without ever printing
         # a read-back verdict that never happened.
-        if ! printf '%s\n' "$file" >> "$CREATED_LOG" 2>/dev/null; then
+        # stderr redirected before the target so a failed redirect cannot
+        # leak the shell's own diagnostic past the suppression.
+        if ! printf '%s\n' "$file" 2>/dev/null >> "$CREATED_LOG"; then
             echo "cannot record creation event!"
             return 6
         fi
@@ -307,6 +309,7 @@ parallel_process_files() {
     sort -n "$RESULTS" > "$SORTED" || { error "could not order results"; exit 1; }
 
     local i rc line expected=0 event_failures=0
+    CNT_UNVERIFIED_AFTER_EVENT_FAIL=0
     while IFS=$'\t' read -r i rc line; do
         # A path containing a newline would split its record and shift every
         # index after it; a tab would shift one record's fields past
@@ -341,7 +344,8 @@ parallel_process_files() {
             # verified nor I/O-lost.
             6) CNT_CREATED=$((CNT_CREATED+1))
                CNT_UNVERIFIED=$((CNT_UNVERIFIED+1))
-               event_failures=$((event_failures+1)) ;;
+               event_failures=$((event_failures+1))
+               CNT_UNVERIFIED_AFTER_EVENT_FAIL=$((CNT_UNVERIFIED_AFTER_EVENT_FAIL+1)) ;;
         esac
         CNT_SCANNED=$((CNT_SCANNED+1))
     done < "$SORTED"
@@ -349,8 +353,11 @@ parallel_process_files() {
     # Creation events arrived through the log, not through records. Status-6
     # creations never made it into the log, so their count is added back.
     if [ "$mode" = "create" ]; then
-        CNT_CREATED=$(wc -l < "$CREATED_LOG" | tr -d ' ')
-        CNT_CREATED=$((CNT_CREATED+event_failures))
+        if ! CREATED_COUNT=$(wc -l < "$CREATED_LOG" | tr -d ' '); then
+            error "could not read the creation log"
+            exit 1
+        fi
+        CNT_CREATED=$((CREATED_COUNT+event_failures))
     fi
     if [ $event_failures -gt 0 ]; then
         error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count above still includes them"
@@ -481,6 +488,13 @@ echo -e "Mismatched:      ${CNT_MISMATCH}$([ $CNT_MISMATCH -gt 0 ] && echo "   $
 echo "Missing/empty:   $CNT_MISSING"
 echo "I/O errors:      $CNT_IOERR"
 
+# A normal create run promises to read back what it wrote. Status 6 means a
+# sidecar was written but its read-back never happened because bookkeeping
+# failed first, so that run has not kept the promise and must not exit 0.
+# Under -c -n nothing was promised, so the warning alone stands.
+if [ "$NO_VERIFY" -eq 0 ] && [ "$CNT_UNVERIFIED_AFTER_EVENT_FAIL" -gt 0 ]; then
+    return 1
+fi
 if [ $find_status -ne 0 ]; then
     return 1
 elif [ $CNT_MISMATCH -gt 0 ] || [ $CNT_IOERR -gt 0 ]; then
