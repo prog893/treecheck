@@ -352,11 +352,14 @@ parallel_process_files() {
     # Creation events arrived through the log, not through records. Status-6
     # creations never made it into the log, so their count is added back.
     if [ "$mode" = "create" ]; then
-        if ! CREATED_COUNT=$(wc -l < "$CREATED_LOG" | tr -d ' '); then
+        # Checked alone rather than in a pipeline: the status of this read
+        # must not depend on shell options surviving around it.
+        if ! CREATED_COUNT=$(wc -l < "$CREATED_LOG"); then
             error "could not read the creation log"
             exit 1
         fi
-        CNT_CREATED=$((CREATED_COUNT+event_failures))
+        CNT_CREATED=${CREATED_COUNT//[[:space:]]/}
+        CNT_CREATED=$((CNT_CREATED+event_failures))
     fi
     if [ $event_failures -gt 0 ]; then
         error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count above still includes them"
