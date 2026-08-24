@@ -56,12 +56,11 @@ EOF
 
 error() { echo -e "${RED}ERROR: $*${NC}" >&2; }
 
-FILE_LIST="" FIND_ERR="" RESULTS="" SORTED="" WORK_INPUT=""
+FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT=""
 cleanup_tmp() {
     [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST"
     [ -n "$FIND_ERR" ] && rm -f "$FIND_ERR" "$FIND_ERR.all"
-    [ -n "$RESULTS" ] && rm -f "$RESULTS"
-    [ -n "$SORTED" ] && rm -f "$SORTED"
+    [ -n "$RESULTS_DIR" ] && rm -rf "$RESULTS_DIR"
     [ -n "$WORK_INPUT" ] && rm -f "$WORK_INPUT"
     [ -n "${CREATED_LOG:-}" ] && rm -f "$CREATED_LOG"
     return 0
@@ -224,7 +223,7 @@ create_file_hash() {
 }
 
 # One unit of parallel work. Emits a single tab-separated record:
-#   index <TAB> status <TAB> display line
+#   written to RESULTS_DIR/<index>; one file per record, no shared appends
 # The status codes are data here, not exit codes: the worker always exits 0
 # so that xargs does not mistake an ordinary corrupt file for a broken run.
 # Creation events travel out of band: create_file_hash appends them to
@@ -243,7 +242,12 @@ hash_worker() {
     # two (the creation report, then the read-back verdict), so newlines
     # travel escaped and are restored just before display.
     out=${out//$'\n'/$'\001'}
-    printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out"
+    # Each result lands in its own index-named file. Appending to one shared
+    # file is only collision-free while every write stays under the stdio
+    # buffer size, and a deep path plus a mismatch diagnostic can exceed
+    # that; interleaved halves would corrupt the stream.
+    printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out" \
+        > "$RESULTS_DIR/$i"
     return 0
 }
 
@@ -252,8 +256,7 @@ hash_worker() {
 # to what the sequential engine prints, whatever order the workers finish in.
 parallel_process_files() {
     local mode="$1"
-    RESULTS=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
-    SORTED=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    RESULTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary directory"; exit 1; }
     WORK_INPUT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     CREATED_LOG=""
     if [ "$mode" = "create" ]; then
@@ -269,7 +272,7 @@ parallel_process_files() {
     fi
 
     WORKER_MODE="$mode"
-    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG
+    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR
     export -f hash_worker verify_file_hash create_file_hash compute_hash
 
     echo "Hashing with $JOBS parallel workers..."
@@ -303,13 +306,14 @@ parallel_process_files() {
     # whether an empty list still runs the command once.
     if [ "$TOTAL_FILES" -gt 0 ]; then
         xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
-            < "$WORK_INPUT" > "$RESULTS" || { error "parallel hashing failed"; exit 1; }
+            < "$WORK_INPUT" >/dev/null || { error "parallel hashing failed"; exit 1; }
     fi
 
-    sort -n "$RESULTS" > "$SORTED" || { error "could not order results"; exit 1; }
-
-    local i rc line expected=0 event_failures=0
-    while IFS=$'\t' read -r i rc line; do
+    # Replay walks the indices in order, so ordering needs no sort and a
+    # missing or empty result is named precisely instead of shifting every
+    # verdict after it.
+    local i rc line event_failures=0
+    for (( expected=0; expected<TOTAL_FILES; expected++ )); do
         # A path containing a newline would split its record and shift every
         # index after it; a tab would shift one record's fields past
         # validation. Newline and escape-byte paths are refused before
@@ -317,16 +321,27 @@ parallel_process_files() {
         # stream from printing shifted or mislabeled verdicts: a report that
         # looks right but describes the wrong files is the one failure this
         # tool must never have. Sequential mode handles such trees correctly.
+        RESULT_FILE="$RESULTS_DIR/$expected"
+        if [ ! -s "$RESULT_FILE" ]; then
+            error "internal: no result arrived for record $expected"
+            error "rerun with -j 1 and report this output"
+            exit 1
+        fi
+        IFS=$'\t' read -r i rc line < "$RESULT_FILE" || {
+            error "internal: could not read result for record $expected"
+            error "rerun with -j 1 and report this output"
+            exit 1
+        }
+        # Backstop against a record whose index does not match its slot.
         if [ "$i" != "$expected" ]; then
-            error "internal: results arrived misaligned at record $expected (got $i)"
-            error "the tree may contain paths with newlines; rerun with -j 1"
+            error "internal: record $expected carries index $i"
+            error "rerun with -j 1 and report this output"
             exit 1
         fi
         case $rc in
             0|1|2|3|4|5|6) : ;;
             *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
         esac
-        expected=$((expected+1))
         line=${line//$'\001'/$'\n'}
         echo "$line"
         case $rc in
@@ -347,7 +362,7 @@ parallel_process_files() {
                CNT_UNVERIFIED_AFTER_EVENT_FAIL=$((CNT_UNVERIFIED_AFTER_EVENT_FAIL+1)) ;;
         esac
         CNT_SCANNED=$((CNT_SCANNED+1))
-    done < "$SORTED"
+    done
 
     # Creation events arrived through the log, not through records. Status-6
     # creations never made it into the log, so their count is added back.

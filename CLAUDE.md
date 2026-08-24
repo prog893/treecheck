@@ -2,7 +2,7 @@
 
 A single POSIX-ish bash script at `bin/treecheck`. No build step. The core
 set is `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`, `mktemp`, `wc`;
-parallel hashing adds `sort` and an `xargs` built with `-P` support, which
+parallel hashing adds an `xargs` built with `-P` support, which
 is common but not POSIX. Worker-count auto-detection consults `sysctl` or
 `nproc` and falls back to 1 without either. When `-j 1` is chosen
 explicitly, only the core set runs. Anything a minimal container strips

@@ -127,10 +127,10 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 - `find` with `-print0` support
 - standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`
 
-Parallel hashing (the default on multi-core machines) additionally uses
-`sort` and an `xargs` built with `-P`. That flag is common but not POSIX;
-where it is missing the tool says so up front and `-j 1` always works with
-the core set alone.
+Parallel hashing (the default on multi-core machines) additionally uses an
+`xargs` built with `-P`. That flag is common but not POSIX; where it is
+missing the tool says so up front and `-j 1` always works with the core set
+alone.
 
 ## License
 
