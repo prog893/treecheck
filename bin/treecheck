@@ -346,9 +346,11 @@ parallel_process_files() {
         CNT_SCANNED=$((CNT_SCANNED+1))
     done < "$SORTED"
 
-    # Creation events arrived through the log, not through records.
+    # Creation events arrived through the log, not through records. Status-6
+    # creations never made it into the log, so their count is added back.
     if [ "$mode" = "create" ]; then
         CNT_CREATED=$(wc -l < "$CREATED_LOG" | tr -d ' ')
+        CNT_CREATED=$((CNT_CREATED+event_failures))
     fi
     if [ $event_failures -gt 0 ]; then
         error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count above still includes them"
@@ -507,7 +509,12 @@ while [[ $# -gt 0 ]]; do
         --exclude|-e) IFS=',' read -ra EXCLUDE_DIRS <<< "$2"; shift 2 ;;
         --jobs|-j)
             case "${2:-}" in
-                ''|*[!0-9]*|0) error "--jobs needs a positive integer, got: ${2:-<missing>}"; exit 1 ;;
+                ''|*[!0-9]*) error "--jobs needs a positive integer, got: ${2:-<missing>}"; exit 1 ;;
+                # All-zero strings like 00 parse as zero and would silently
+                # re-enter automatic selection; a positive integer has a
+                # nonzero digit somewhere.
+                *[1-9]*) : ;;
+                *) error "--jobs needs a positive integer, got: $2"; exit 1 ;;
             esac
             JOBS="$2"; shift 2 ;;
         --verbose) VERBOSE=1; shift ;;
