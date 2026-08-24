@@ -8,7 +8,7 @@ dependency tiers:
 - Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
   `-P`, which is common but not POSIX; probed before dispatching instead of
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
-  a fallback to 1.
+  a fallback to 1. An explicit `-j 1` needs nothing from this tier.
 - Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
   `grep`, `mv`, `sleep`. Never used for piped output.
 

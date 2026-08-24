@@ -257,7 +257,11 @@ hash_worker() {
     # Both writes are a handful of bytes, small enough that concurrent
     # appends cannot interleave.
     if [ -n "${INFLIGHT:-}" ]; then
-        printf '%s\t%s\n' "$i" "$f" >> "$INFLIGHT"
+        # Display-only bookkeeping: losing an entry makes the status line
+        # less informative, never the verification less correct.
+        if ! printf '%s\t%s\n' "$i" "$f" 2>/dev/null >> "$INFLIGHT"; then
+            echo "treecheck: progress tracking is degraded for this file" >&2
+        fi
     fi
     if [ "$WORKER_MODE" = "create" ]; then
         out=$(create_file_hash "$f" 2>&1); rc=$?
@@ -316,7 +320,9 @@ progress_monitor() {
         if [ "$CONSUMED" -gt 0 ]; then
             ioff=$((ioff+CONSUMED))
             while IFS= read -r evline; do
-                printf '%s\n' "$evline" >> "$ACTIVE"
+                if ! printf '%s\n' "$evline" 2>/dev/null >> "$ACTIVE"; then
+                    echo "treecheck: the live file list could not be updated" >&2
+                fi
             done < "$MONBUF"
         fi
         consume_new "$DONE_LOG" "$doff"
@@ -474,9 +480,12 @@ parallel_process_files() {
         # The full index range is generated in a regular file by a loop whose
         # failure is checked: an empty range here would silently suppress
         # every fallback verdict.
-        : > "$ALL_IDX"
+        : > "$ALL_IDX" || { error "could not prepare the replay index"; exit 1; }
         while [ "$idxgen" -lt "$TOTAL_FILES" ]; do
-            printf '%s\n' "$idxgen" >> "$ALL_IDX"
+            if ! printf '%s\n' "$idxgen" >> "$ALL_IDX"; then
+                error "could not build the replay index"
+                exit 1
+            fi
             idxgen=$((idxgen+1))
         done
         if ! awk 'NR==FNR { s[$1]; next } !($1 in s) { print }' \
