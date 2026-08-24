@@ -182,7 +182,13 @@ create_file_hash() {
     # travels there instead. The sequential engine never sets the
     # variable and keeps this counter as its source of truth.
     if [ -n "${CREATED_LOG:-}" ]; then
-        printf '%s\n' "$file" >> "$CREATED_LOG"
+        # A lost event would make the parallel summary undercount creations
+        # while printing a clean bill, which is the one species of lie this
+        # tool refuses. Fail this file like an unwritable sidecar instead.
+        if ! printf '%s\n' "$file" >> "$CREATED_LOG" 2>/dev/null; then
+            echo "cannot record creation event!"
+            return 5
+        fi
     fi
     echo "sidecar created!"
 
@@ -248,6 +254,14 @@ parallel_process_files() {
     CREATED_LOG=""
     if [ "$mode" = "create" ]; then
         CREATED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    fi
+
+    # The parallel engine needs xargs -P, which is common but not part of
+    # POSIX xargs. Probe once up front instead of dying mid-walk.
+    if ! printf 'ok\n' | xargs -P 1 -n1 true 2>/dev/null; then
+        error "this xargs cannot run parallel workers (-P unsupported)"
+        error "rerun with -j 1"
+        exit 1
     fi
 
     WORKER_MODE="$mode"

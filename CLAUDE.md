@@ -1,9 +1,13 @@
 # treecheck Development Guide
 
-A single POSIX-ish bash script at `bin/treecheck`. No build step, no
-dependencies beyond `bash` and the standard userland it calls: `find`,
-`shasum`, `tr`, `sed`, `rm`, `mktemp`. Anything a minimal container strips
-beyond those is a real portability break.
+A single POSIX-ish bash script at `bin/treecheck`. No build step. The core
+set is `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`, `mktemp`, `wc`;
+parallel hashing adds `sort`, `tail`, and an `xargs` built with `-P` support,
+which is common but not POSIX. Worker-count auto-detection consults
+`sysctl` or `nproc` and falls back to 1 without either. When `-j 1` is
+chosen explicitly, only the core set runs. Anything a minimal container
+strips beyond those is a real portability break, and the parallel engine
+probes for `-P` before dispatching instead of failing mid-walk.
 
 ## What this tool promises
 
