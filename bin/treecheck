@@ -56,6 +56,19 @@ EOF
 
 error() { echo -e "${RED}ERROR: $*${NC}" >&2; }
 
+# Shared by the standalone and bundled -j forms; reports whichever spelling
+# the caller used.
+validate_jobs() {
+    local opt="$1" val="$2"
+    # All-zero strings like 00 parse as zero and would silently re-enter
+    # automatic selection, so a positive integer must hold a nonzero digit.
+    case "$val" in
+        ''|*[!0-9]*) error "$opt needs a positive integer, got: ${val:-<missing>}"; return 1 ;;
+        *[1-9]*) : ;;
+        *) error "$opt needs a positive integer, got: $val"; return 1 ;;
+    esac
+}
+
 FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT=""
 cleanup_tmp() {
     [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST"
@@ -572,19 +585,6 @@ while [[ $# -gt 0 ]]; do
         *) TARGET_DIR="$1"; shift ;;
     esac
 done
-
-# Shared by the standalone and bundled -j forms; reports whichever spelling
-# the caller used.
-validate_jobs() {
-    local opt="$1" val="$2"
-    # All-zero strings like 00 parse as zero and would silently re-enter
-    # automatic selection, so a positive integer must hold a nonzero digit.
-    case "$val" in
-        ''|*[!0-9]*) error "$opt needs a positive integer, got: ${val:-<missing>}"; return 1 ;;
-        *[1-9]*) : ;;
-        *) error "$opt needs a positive integer, got: $val"; return 1 ;;
-    esac
-}
 
 # Validate and run
 [ -z "$TARGET_DIR" ] && { error "No directory specified"; usage; }
