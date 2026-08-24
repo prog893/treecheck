@@ -125,11 +125,12 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 - `bash`
 - `shasum` (standard on macOS and Linux)
 - `find` with `-print0` support
-- standard userland: `sort`, `tail`, `tr`, `sed`, `rm`, `mktemp`, `wc`
+- standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`
 
 Parallel hashing (the default on multi-core machines) additionally uses
-`xargs -P`. That flag is common but not POSIX; where it is missing the tool
-says so up front and `-j 1` always works with the core set alone.
+`sort` and an `xargs` built with `-P`. That flag is common but not POSIX;
+where it is missing the tool says so up front and `-j 1` always works with
+the core set alone.
 
 ## License
 

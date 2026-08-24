@@ -3,7 +3,7 @@
 # NVMe integrity checker - creates/verifies SHA-256 sidecar files
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # Config
 HASH_EXT=".sha256"
@@ -542,7 +542,8 @@ done
 
 # Resolve automatic worker count: one per CPU, on either platform.
 if [ "$JOBS" -eq 0 ]; then
-    JOBS=$( { sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1; } | tail -n 1 )
+    JOBS=$( { sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1; } )
+    JOBS=${JOBS%%$'\n'*}
     case "$JOBS" in
         ''|*[!0-9]*|0) JOBS=1 ;;
     esac
