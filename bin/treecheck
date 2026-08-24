@@ -69,13 +69,16 @@ validate_jobs() {
     esac
 }
 
-FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT=""
+FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT="" STREAMED=0
 cleanup_tmp() {
     [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST"
     [ -n "$FIND_ERR" ] && rm -f "$FIND_ERR" "$FIND_ERR.all"
     [ -n "$RESULTS_DIR" ] && rm -rf "$RESULTS_DIR"
     [ -n "$WORK_INPUT" ] && rm -f "$WORK_INPUT"
     [ -n "${CREATED_LOG:-}" ] && rm -f "$CREATED_LOG"
+    [ -n "${INFLIGHT:-}" ] && rm -f "$INFLIGHT"
+    [ -n "${DONE_LOG:-}" ] && rm -f "$DONE_LOG"
+    [ -n "${MONBUF:-}" ] && rm -f "$MONBUF"
     return 0
 }
 trap cleanup_tmp EXIT
@@ -246,6 +249,12 @@ create_file_hash() {
 # empty-sidecar rewrite wrong.
 hash_worker() {
     local i="$1" f="$2" out rc
+    # Progress events travel only when an interactive display is wired up.
+    # Both writes are a handful of bytes, small enough that concurrent
+    # appends cannot interleave.
+    if [ -n "${INFLIGHT:-}" ]; then
+        printf '%s\t%s\n' "$i" "$f" >> "$INFLIGHT"
+    fi
     if [ "$WORKER_MODE" = "create" ]; then
         out=$(create_file_hash "$f" 2>&1); rc=$?
     else
@@ -261,7 +270,71 @@ hash_worker() {
     # that; interleaved halves would corrupt the stream.
     printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out" \
         > "$RESULTS_DIR/$i"
+    if [ -n "${DONE_LOG:-}" ]; then
+        printf '%s\n' "$i" >> "$DONE_LOG"
+    fi
     return 0
+}
+
+# Live display for an interactive terminal: completed verdicts scroll above
+# a continuously redrawn status line carrying a spinner, the done count out
+# of the total, elapsed time, and what is currently being hashed. Completions
+# arrive in whatever order the workers finish; strict walk order is a
+# property of the piped output, not of a live view.
+progress_monitor() {
+    local total="$1" xpid="$2"
+    local off=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
+    local inflight rate pct
+    while kill -0 "$xpid" 2>/dev/null; do
+        if [ -s "$DONE_LOG" ]; then
+            local sz
+            sz=$(wc -c < "$DONE_LOG")
+            if [ "$sz" -gt "$off" ]; then
+                tail -c +"$((off+1))" "$DONE_LOG" > "$MONBUF"
+                while IFS= read -r idx; do
+                    [ -n "$idx" ] || continue
+                    done=$((done+1))
+                    if [ -s "$RESULTS_DIR/$idx" ]; then
+                        IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
+                        line=${line//$'\001'/$'\n'}
+                        printf '\r\033[K%s\n' "$line"
+                    fi
+                done < "$MONBUF"
+                off=$sz
+            fi
+        fi
+        # In-flight names: started minus completed, most recent last.
+        inflight=$(awk -F'\t' 'NR==FNR { c[$1]; next } !($1 in c) { print $2 }' \
+            "$DONE_LOG" "$INFLIGHT" 2>/dev/null | tail -n 3 \
+            | sed 's#.*/##' | paste -s -d ', ' -)
+        rate=0
+        [ $((SECONDS-start)) -gt 0 ] && rate=$((done/(SECONDS-start)))
+        pct=0
+        [ "$total" -gt 0 ] && pct=$((done*100/total))
+        printf '\r\033[K %s %d/%d %d%% %ds %.1f/s hashing: %s' \
+            "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
+            "$((SECONDS-start))" "$rate" "${inflight:-...}"
+        spin=$((spin+1))
+        sleep 0.5
+    done
+    # Final drain for records that landed between the last poll and exit.
+    if [ -s "$DONE_LOG" ]; then
+        local sz
+        sz=$(wc -c < "$DONE_LOG")
+        if [ "$sz" -gt "$off" ]; then
+            tail -c +"$((off+1))" "$DONE_LOG" > "$MONBUF"
+            while IFS= read -r idx; do
+                [ -n "$idx" ] || continue
+                done=$((done+1))
+                if [ -s "$RESULTS_DIR/$idx" ]; then
+                    IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
+                    line=${line//$'\001'/$'\n'}
+                    printf '\r\033[K%s\n' "$line"
+                fi
+            done < "$MONBUF"
+        fi
+    fi
+    printf '\r\033[K'
 }
 
 # Hash FILE_LIST across $JOBS workers. Each result lands in its own
@@ -286,10 +359,21 @@ parallel_process_files() {
     fi
 
     WORKER_MODE="$mode"
-    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR
+    STREAMED=0
+    INFLIGHT="" DONE_LOG="" MONBUF=""
+    if [ -t 1 ]; then
+        INFLIGHT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+        DONE_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+        MONBUF=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+        STREAMED=1
+    fi
+    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG
     export -f hash_worker verify_file_hash create_file_hash compute_hash
 
-    echo "Hashing with $JOBS parallel workers..."
+    [ "$STREAMED" -eq 1 ] && echo "Hashing with $JOBS parallel workers..."
+    if [ "$STREAMED" -eq 0 ]; then
+        echo "Hashing with $JOBS parallel workers..."
+    fi
 
     # Index and path travel as two NUL-separated arguments per worker. The
     # enumeration runs against a file, not a pipeline: inside `while | xargs`
@@ -319,8 +403,16 @@ parallel_process_files() {
     # xargs is guarded against empty input because GNU and BSD disagree on
     # whether an empty list still runs the command once.
     if [ "$TOTAL_FILES" -gt 0 ]; then
-        xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
-            < "$WORK_INPUT" >/dev/null || { error "parallel hashing failed"; exit 1; }
+        if [ "$STREAMED" -eq 1 ]; then
+            xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
+                < "$WORK_INPUT" >/dev/null 2>/dev/null &
+            XPID=$!
+            progress_monitor "$TOTAL_FILES" "$XPID"
+            wait "$XPID" || { error "parallel hashing failed"; exit 1; }
+        else
+            xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
+                < "$WORK_INPUT" >/dev/null || { error "parallel hashing failed"; exit 1; }
+        fi
     fi
 
     # Replay walks the indices in order, so ordering needs no sort and a
@@ -357,7 +449,11 @@ parallel_process_files() {
             *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
         esac
         line=${line//$'\001'/$'\n'}
-        echo "$line"
+        # On an interactive terminal the monitor already streamed these as
+        # they completed; a pipe gets every verdict here in walk order.
+        if [ "$STREAMED" -eq 0 ]; then
+            echo "$line"
+        fi
         case $rc in
             0) CNT_OK=$((CNT_OK+1)) ;;
             1) CNT_MISMATCH=$((CNT_MISMATCH+1)) ;;

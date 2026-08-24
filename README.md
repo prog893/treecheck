@@ -102,6 +102,14 @@ Mode combinations:
 | `-c -n` | Create only, skip verification |
 | `-n` alone | Nothing to do, exits with a message |
 
+## Output
+
+On an interactive terminal the parallel engine shows live progress: completed
+verdicts scroll above a status line with the running count, percentage,
+elapsed time, and what is currently being hashed. Piped or redirected output
+carries none of that - every verdict appears exactly once, in walk order,
+with no control characters, so it can go through `grep` or into a log.
+
 ## How it works
 
 For `video.mxf`, `treecheck` writes `video.mxf.sha256` containing that file's SHA-256 digest. On a later run it re-hashes `video.mxf` and compares.
