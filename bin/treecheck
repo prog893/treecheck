@@ -63,6 +63,7 @@ cleanup_tmp() {
     [ -n "$RESULTS" ] && rm -f "$RESULTS"
     [ -n "$SORTED" ] && rm -f "$SORTED"
     [ -n "$WORK_INPUT" ] && rm -f "$WORK_INPUT"
+    [ -n "${CREATED_LOG:-}" ] && rm -f "$CREATED_LOG"
     return 0
 }
 trap cleanup_tmp EXIT
@@ -176,6 +177,13 @@ create_file_hash() {
         return 5
     fi
     CNT_CREATED=$((CNT_CREATED+1))
+    # A parallel worker runs this in a subshell and cannot mutate the
+    # parent's counters, so when a creation log is wired up the event
+    # travels there instead. The sequential engine never sets the
+    # variable and keeps this counter as its source of truth.
+    if [ -n "${CREATED_LOG:-}" ]; then
+        printf '%s\n' "$file" >> "$CREATED_LOG"
+    fi
     echo "sidecar created!"
 
     # Verify newly created hash unless NO_VERIFY is set
@@ -206,34 +214,26 @@ create_file_hash() {
 }
 
 # One unit of parallel work. Emits a single tab-separated record:
-#   index <TAB> status <TAB> created(0|1) <TAB> display line
+#   index <TAB> status <TAB> display line
 # The status codes are data here, not exit codes: the worker always exits 0
 # so that xargs does not mistake an ordinary corrupt file for a broken run.
-# Subshells cannot mutate the parent's counters, so "created" travels in the
-# record instead of being incremented inside create_file_hash.
+# Creation events travel out of band: create_file_hash appends them to
+# $CREATED_LOG when the parallel engine wires one up, because a subshell
+# cannot mutate the parent's counters and inferring the event from pre-call
+# state or final status gets both the unreadable-source case and the
+# empty-sidecar rewrite wrong.
 hash_worker() {
-    local i="$1" f="$2" created=0 out rc
+    local i="$1" f="$2" out rc
     if [ "$WORKER_MODE" = "create" ]; then
-        # Creation counts exactly where the sequential engine counts it: the
-        # write path was taken (no pre-existing sidecar, or -f forced a
-        # rewrite) and the write itself succeeded. A sidecar that was written
-        # but failed its read-back still counts as created, matching -j 1.
-        local write_path=0
-        if ! { [ -f "${f}${HASH_EXT}" ] && [ $FORCE -eq 0 ]; }; then
-            write_path=1
-        fi
         out=$(create_file_hash "$f" 2>&1); rc=$?
-        if [ $write_path -eq 1 ] && [ $rc -ne 5 ]; then created=1; fi
-        # One record must be one physical line: create mode legitimately
-        # prints two (the creation report, then the read-back verdict), so
-        # newlines travel escaped and are restored just before display.
-        out=${out//$'\n'/$'\001'}
-        printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$created" "$f" "$out"
     else
         out=$(verify_file_hash "$f" 2>&1); rc=$?
-        out=${out//$'\n'/$'\001'}
-        printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" 0 "$f" "$out"
     fi
+    # One record must be one physical line: create mode legitimately prints
+    # two (the creation report, then the read-back verdict), so newlines
+    # travel escaped and are restored just before display.
+    out=${out//$'\n'/$'\001'}
+    printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out"
     return 0
 }
 
@@ -245,9 +245,13 @@ parallel_process_files() {
     RESULTS=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     SORTED=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     WORK_INPUT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    CREATED_LOG=""
+    if [ "$mode" = "create" ]; then
+        CREATED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    fi
 
     WORKER_MODE="$mode"
-    export WORKER_MODE HASH_EXT FORCE NO_VERIFY
+    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG
     export -f hash_worker verify_file_hash create_file_hash compute_hash
 
     echo "Hashing with $JOBS parallel workers..."
@@ -263,8 +267,12 @@ parallel_process_files() {
             # Newlines split the record stream and \x01 is the escape byte
             # for multi-line verdicts, so neither may travel inside a path.
             # Both are refused before any hashing starts; -j 1 handles them.
-            *$'\n'*|*$'\001'*)
+            *$'\n'*)
                 error "cannot hash in parallel: path contains a newline: $f"
+                error "rerun with -j 1"
+                exit 1 ;;
+            *$'\001'*)
+                error "cannot hash in parallel: path contains a 0x01 byte: $f"
                 error "rerun with -j 1"
                 exit 1 ;;
         esac
@@ -282,15 +290,16 @@ parallel_process_files() {
 
     sort -n "$RESULTS" > "$SORTED" || { error "could not order results"; exit 1; }
 
-    local i rc created line expected=0
-    while IFS=$'\t' read -r i rc created line; do
+    local i rc line expected=0
+    while IFS=$'\t' read -r i rc line; do
         # A path containing a newline would split its record and shift every
-        # index after it; a tab inside a path would shift the fields of one
-        # record. Both are refused loudly instead of printing shifted or
-        # mislabeled verdicts: a report that looks right but describes the
-        # wrong files is the one failure this tool must never have.
-        # Sequential mode handles such trees correctly; suggest it and stop.
-        if [ "$i" != "$expected" ] || { [ "$created" != "0" ] && [ "$created" != "1" ]; }; then
+        # index after it; a tab would shift one record's fields past
+        # validation. Newline and escape-byte paths are refused before
+        # dispatch, so this guard is the backstop that keeps a corrupted
+        # stream from printing shifted or mislabeled verdicts: a report that
+        # looks right but describes the wrong files is the one failure this
+        # tool must never have. Sequential mode handles such trees correctly.
+        if [ "$i" != "$expected" ]; then
             error "internal: results arrived misaligned at record $expected (got $i)"
             error "the tree may contain paths with newlines; rerun with -j 1"
             exit 1
@@ -312,9 +321,13 @@ parallel_process_files() {
             # source; the distinct code exists only so creation is not counted.
             5) CNT_IOERR=$((CNT_IOERR+1)) ;;
         esac
-        [ "$created" = "1" ] && CNT_CREATED=$((CNT_CREATED+1))
         CNT_SCANNED=$((CNT_SCANNED+1))
     done < "$SORTED"
+
+    # Creation events arrived through the log, not through records.
+    if [ "$mode" = "create" ]; then
+        CNT_CREATED=$(wc -l < "$CREATED_LOG" | tr -d ' ')
+    fi
 
     if [ "$CNT_SCANNED" -ne "$TOTAL_FILES" ]; then
         error "internal: $TOTAL_FILES files were dispatched but $CNT_SCANNED results came back"
