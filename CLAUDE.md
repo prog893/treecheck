@@ -43,7 +43,7 @@ fixture holding **all** outcome categories at once:
 | unreadable **hidden** dir (`.Trashes`) | pruned, no error |
 | unreadable **non-hidden** dir | walk fails, exit 1 |
 | create-only run over a fresh tree (`-c -n`) | counted as `Not verified`, never as `Verified` |
-| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers:` header and `Hashing with N workers...`), identical exit status |
+| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`), identical exit status |
 | path containing a newline or `0x01` under `-j > 1` | refused before any hashing, exit 1, message names `-j 1` |
 
 Confirm exit status every time, since it is a documented interface:
