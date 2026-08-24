@@ -289,24 +289,16 @@ hash_worker() {
 # of the total, elapsed time, and what is currently being hashed. Completions
 # arrive in whatever order the workers finish; strict walk order is a
 # property of the piped output, not of a live view.
-# Emit the leading complete lines of what arrived in $1 since byte $2 and
-# set CONSUMED to the bytes they occupy. A concurrent append can be cut
-# mid-line; the partial tail stays unread until it is complete.
+# Emit what arrived in $1 since byte $2 and set CONSUMED to those bytes.
+# Every event is a single write of a handful of bytes - well under any
+# buffering boundary - so a chunk can only ever end on a line boundary;
+# there is no partial-line case to defend against.
 consume_new() {
-    local size lastb
+    local size
     size=$(wc -c < "$1")
     if [ "$size" -le "$2" ]; then CONSUMED=0; return 0; fi
     tail -c +"$(($2+1))" "$1" > "$MONBUF"
-    size=$(wc -c < "$MONBUF")
-    if [ "$size" -eq 0 ]; then CONSUMED=0; return 0; fi
-    lastb=$(tail -c 1 "$MONBUF" | od -An -n -tu1 | tr -d ' \t')
-    if [ "$lastb" != "10" ]; then
-        CONSUMED=$(awk '{ n += length($0) + 1 } END { print n + 0 }' "$MONBUF")
-        head -c "$CONSUMED" "$MONBUF" > "$MONBUF.part" && mv "$MONBUF.part" "$MONBUF"
-    else
-        CONSUMED=$size
-    fi
-    cat "$MONBUF"
+    CONSUMED=$(wc -c < "$MONBUF")
 }
 
 progress_monitor() {
@@ -317,14 +309,14 @@ progress_monitor() {
     # appended as they arrive, completed ones are filtered out, and its
     # size never exceeds the number of workers actually mid-file.
     local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
-    local inflight rate pct STREAMED_LOG
-    STREAMED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || return 1
-    export STREAMED_LOG
+    local inflight rate_x10 pct a1 a2 a3
     while kill -0 "$xpid" 2>/dev/null; do
         consume_new "$INFLIGHT" "$ioff"
         if [ "$CONSUMED" -gt 0 ]; then
             ioff=$((ioff+CONSUMED))
-            cat "$MONBUF" >> "$ACTIVE"
+            while IFS= read -r evline; do
+                printf '%s\n' "$evline" >> "$ACTIVE"
+            done < "$MONBUF"
         fi
         consume_new "$DONE_LOG" "$doff"
         if [ "$CONSUMED" -gt 0 ]; then
@@ -345,15 +337,26 @@ progress_monitor() {
                 fi
             done < "$MONBUF"
         fi
-        inflight=$(tail -n 3 "$ACTIVE" | cut -f2 | sed 's#.*/##' \
-            | paste -s -d ', ' -)
-        rate=0
-        [ $((SECONDS-start)) -gt 0 ] && rate=$((done/(SECONDS-start)))
+        # Last three started-but-not-finished paths, oldest first.
+        a1="" a2="" a3=""
+        while IFS=$'\t' read -r _ apath; do
+            a1=$a2; a2=$a3; a3=${apath##*/}
+        done < "$ACTIVE"
+        inflight=""
+        [ -n "$a1" ] && inflight="$a1"
+        [ -n "$a2" ] && inflight="${inflight:+$inflight, }$a2"
+        [ -n "$a3" ] && inflight="${inflight:+$inflight, }$a3"
+        # Tenths first: integer division would truncate 0.5 to 0.0.
+        rate_x10=0
+        if [ $((SECONDS-start)) -gt 0 ]; then
+            rate_x10=$((done*10/(SECONDS-start)))
+        fi
         pct=0
-        [ "$total" -gt 0 ] && pct=$((done*100/total))
-        printf '\r\033[K %s %d/%d %d%% %ds %.1f/s hashing: %s' \
+        if [ "$total" -gt 0 ]; then pct=$((done*100/total)); fi
+        printf '\r\033[K %s %d/%d %d%% %ds %d.%d/s hashing: %s' \
             "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
-            "$((SECONDS-start))" "$rate" "${inflight:-...}"
+            "$((SECONDS-start))" "$((rate_x10/10))" "$((rate_x10%10))" \
+            "${inflight:-...}"
         spin=$((spin+1))
         sleep 0.5
     done
@@ -397,6 +400,7 @@ parallel_process_files() {
     WORKER_MODE="$mode"
     STREAMED=0
     INFLIGHT="" DONE_LOG="" MONBUF="" ACTIVE="" STREAMED_LOG="" NEEDS_PRINT=""
+    STREAMED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     if [ -t 1 ]; then
         INFLIGHT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         DONE_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
