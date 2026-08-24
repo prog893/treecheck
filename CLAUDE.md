@@ -4,13 +4,13 @@ A single POSIX-ish bash script at `bin/treecheck`. No build step. Three
 dependency tiers:
 
 - Core (every run): `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`,
-  `mktemp`, `wc`, `grep`.
+  `mktemp`, `wc`.
 - Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
   `-P`, which is common but not POSIX; probed before dispatching instead of
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
   a fallback to 1.
 - Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
-  `mv`, `sleep`. Never used for piped output.
+  `grep`, `mv`, `sleep`. Never used for piped output.
 
 Anything a minimal container strips beyond the tier it exercises is a real
 portability break.

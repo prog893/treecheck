@@ -325,12 +325,15 @@ progress_monitor() {
             while IFS= read -r idx; do
                 [ -n "$idx" ] || continue
                 done=$((done+1))
-                printf '%s\n' "$idx" >> "$STREAMED_LOG"
                 # The completed index leaves the active set; grep finding
                 # nothing is not an error here.
                 grep -v "^${idx}"$'\t' "$ACTIVE" \
                     > "$ACTIVE.new" 2>/dev/null || true
                 mv "$ACTIVE.new" "$ACTIVE"
+                if ! printf '%s\n' "$idx" >> "$STREAMED_LOG" 2>/dev/null; then
+                    printf '\r\033[Kcould not record a display ledger entry; that verdict will appear again in walk order\n'
+                    continue
+                fi
                 if [ -s "$RESULTS_DIR/$idx" ]; then
                     IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
                     line=${line//$'\001'/$'\n'}
@@ -366,7 +369,9 @@ progress_monitor() {
     if [ "$CONSUMED" -gt 0 ]; then
         while IFS= read -r idx; do
             [ -n "$idx" ] || continue
-            printf '%s\n' "$idx" >> "$STREAMED_LOG"
+            if ! printf '%s\n' "$idx" >> "$STREAMED_LOG" 2>/dev/null; then
+                continue
+            fi
             if [ -s "$RESULTS_DIR/$idx" ]; then
                 IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
                 line=${line//$'\001'/$'\n'}
