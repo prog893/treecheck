@@ -162,9 +162,18 @@ create_file_hash() {
         echo "unreadable!"
         return 3
     fi
-    if ! echo "$current_hash" > "$hash_file" 2>/dev/null; then
+    # The write's stderr stays silent: bash would otherwise interleave its own
+    # "Permission denied" diagnostic with a shell-specific prefix (the two
+    # engines run under different parents), and the message below already says
+    # what happened in this tool's words. Redirecting stderr BEFORE the target
+    # matters: once the failing redirect is reached, stderr must already be
+    # somewhere harmless or the diagnostic escapes anyway.
+    if ! echo "$current_hash" 2>/dev/null > "$hash_file"; then
         echo "cannot write sidecar!"
-        return 3
+        # Distinct from the read-failure status on purpose: parallel workers
+        # need to know the write itself failed, so creation is not counted
+        # for a sidecar that never landed. Both engines map it to I/O errors.
+        return 5
     fi
     CNT_CREATED=$((CNT_CREATED+1))
     echo "sidecar created!"
@@ -203,19 +212,23 @@ create_file_hash() {
 # Subshells cannot mutate the parent's counters, so "created" travels in the
 # record instead of being incremented inside create_file_hash.
 hash_worker() {
-    local i="$1" f="$2" existed=0 out rc
+    local i="$1" f="$2" created=0 out rc
     if [ "$WORKER_MODE" = "create" ]; then
-        [ -f "${f}${HASH_EXT}" ] && existed=1
+        # Creation counts exactly where the sequential engine counts it: the
+        # write path was taken (no pre-existing sidecar, or -f forced a
+        # rewrite) and the write itself succeeded. A sidecar that was written
+        # but failed its read-back still counts as created, matching -j 1.
+        local write_path=0
+        if ! { [ -f "${f}${HASH_EXT}" ] && [ $FORCE -eq 0 ]; }; then
+            write_path=1
+        fi
         out=$(create_file_hash "$f" 2>&1); rc=$?
+        if [ $write_path -eq 1 ] && [ $rc -ne 5 ]; then created=1; fi
         # One record must be one physical line: create mode legitimately
         # prints two (the creation report, then the read-back verdict), so
         # newlines travel escaped and are restored just before display.
         out=${out//$'\n'/$'\001'}
-        if [ $existed -eq 0 ] && { [ $rc -eq 0 ] || [ $rc -eq 4 ]; }; then
-            printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" 1 "$f" "$out"
-        else
-            printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" 0 "$f" "$out"
-        fi
+        printf '%s\t%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$created" "$f" "$out"
     else
         out=$(verify_file_hash "$f" 2>&1); rc=$?
         out=${out//$'\n'/$'\001'}
@@ -245,7 +258,17 @@ parallel_process_files() {
     # silently report zero dispatched files.
     local idx=0
     while IFS= read -r -d '' f; do
-        printf '%s\0%s\0' "$idx" "$TARGET_DIR/${f#./}"
+        f="$TARGET_DIR/${f#./}"
+        case $f in
+            # Newlines split the record stream and \x01 is the escape byte
+            # for multi-line verdicts, so neither may travel inside a path.
+            # Both are refused before any hashing starts; -j 1 handles them.
+            *$'\n'*|*$'\001'*)
+                error "cannot hash in parallel: path contains a newline: $f"
+                error "rerun with -j 1"
+                exit 1 ;;
+        esac
+        printf '%s\0%s\0' "$idx" "$f"
         idx=$((idx+1))
     done < "$FILE_LIST" > "$WORK_INPUT"
     TOTAL_FILES=$idx
@@ -273,7 +296,7 @@ parallel_process_files() {
             exit 1
         fi
         case $rc in
-            0|1|2|3|4) : ;;
+            0|1|2|3|4|5) : ;;
             *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
         esac
         expected=$((expected+1))
@@ -285,6 +308,9 @@ parallel_process_files() {
             2) CNT_MISSING=$((CNT_MISSING+1)) ;;
             3) CNT_IOERR=$((CNT_IOERR+1)) ;;
             4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
+            # A sidecar whose write failed is an I/O error like an unreadable
+            # source; the distinct code exists only so creation is not counted.
+            5) CNT_IOERR=$((CNT_IOERR+1)) ;;
         esac
         [ "$created" = "1" ] && CNT_CREATED=$((CNT_CREATED+1))
         CNT_SCANNED=$((CNT_SCANNED+1))
@@ -392,6 +418,7 @@ while IFS= read -r -d '' file; do
     2) CNT_MISSING=$((CNT_MISSING+1)) ;;
     3) CNT_IOERR=$((CNT_IOERR+1)) ;;
     4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
+    5) CNT_IOERR=$((CNT_IOERR+1)) ;;
   esac
 done < "$FILE_LIST"
 fi
