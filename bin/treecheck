@@ -300,10 +300,22 @@ hash_worker() {
 # there is no partial-line case to defend against.
 consume_new() {
     local size
-    size=$(wc -c < "$1")
+    if ! size=$(wc -c < "$1"); then
+        echo "treecheck: could not size a progress log" >&2
+        CONSUMED=0
+        return 1
+    fi
     if [ "$size" -le "$2" ]; then CONSUMED=0; return 0; fi
-    tail -c +"$(($2+1))" "$1" > "$MONBUF"
-    CONSUMED=$(wc -c < "$MONBUF")
+    if ! tail -c +"$(($2+1))" "$1" > "$MONBUF" 2>/dev/null; then
+        echo "treecheck: could not read new progress events" >&2
+        CONSUMED=0
+        return 1
+    fi
+    if ! CONSUMED=$(wc -c < "$MONBUF"); then
+        echo "treecheck: could not size new progress events" >&2
+        CONSUMED=0
+        return 1
+    fi
 }
 
 progress_monitor() {
@@ -316,7 +328,11 @@ progress_monitor() {
     local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
     local inflight rate_x10 pct a1 a2 a3
     while kill -0 "$xpid" 2>/dev/null; do
-        consume_new "$INFLIGHT" "$ioff"
+        if ! consume_new "$INFLIGHT" "$ioff"; then
+            printf '\r\033[Kprogress events unreadable; retrying\n'
+            sleep 0.5
+            continue
+        fi
         if [ "$CONSUMED" -gt 0 ]; then
             ioff=$((ioff+CONSUMED))
             while IFS= read -r evline; do
@@ -325,7 +341,11 @@ progress_monitor() {
                 fi
             done < "$MONBUF"
         fi
-        consume_new "$DONE_LOG" "$doff"
+        if ! consume_new "$DONE_LOG" "$doff"; then
+            printf '\r\033[Kprogress events unreadable; retrying\n'
+            sleep 0.5
+            continue
+        fi
         if [ "$CONSUMED" -gt 0 ]; then
             doff=$((doff+CONSUMED))
             while IFS= read -r idx; do
@@ -476,7 +496,7 @@ parallel_process_files() {
     # displayed its share; the indices it missed are printed here so every
     # verdict reaches the user exactly once.
     local i rc line event_failures=0 NP_NEXT="" idxgen=0
-    if [ "$STREAMED" -eq 1 ] && [ -s "$STREAMED_LOG" ]; then
+    if [ "$STREAMED" -eq 1 ]; then
         # The full index range is generated in a regular file by a loop whose
         # failure is checked: an empty range here would silently suppress
         # every fallback verdict.
