@@ -1,13 +1,19 @@
 # treecheck Development Guide
 
-A single POSIX-ish bash script at `bin/treecheck`. No build step. The core
-set is `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`, `mktemp`, `wc`;
-parallel hashing adds an `xargs` built with `-P` support, which
-is common but not POSIX. Worker-count auto-detection consults `sysctl` or
-`nproc` and falls back to 1 without either. When `-j 1` is chosen
-explicitly, only the core set runs. Anything a minimal container strips
-beyond those is a real portability break, and the parallel engine probes
-for `-P` before dispatching instead of failing mid-walk.
+A single POSIX-ish bash script at `bin/treecheck`. No build step. Three
+dependency tiers:
+
+- Core (every run): `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`,
+  `mktemp`, `wc`.
+- Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
+  `-P`, which is common but not POSIX; probed before dispatching instead of
+  failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
+  a fallback to 1. An explicit `-j 1` needs nothing from this tier.
+- Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
+  `grep`, `mv`, `sleep`. Never used for piped output.
+
+Anything a minimal container strips beyond the tier it exercises is a real
+portability break.
 
 ## What this tool promises
 

@@ -102,6 +102,20 @@ Mode combinations:
 | `-c -n` | Create only, skip verification |
 | `-n` alone | Nothing to do, exits with a message |
 
+## Output
+
+On an interactive terminal the parallel engine shows live progress: completed
+verdicts scroll above a status line with the running count, percentage,
+elapsed time, and what is currently being hashed. Piped or redirected output
+carries none of that - every verdict appears exactly once, in walk order,
+with no control characters, so it can go through `grep` or into a log.
+
+## Parallel output
+
+The interactive status line exists only on a terminal. It never appears in
+piped or redirected output, which carries exactly what parallel hashing has
+always carried: one verdict per file in walk order.
+
 ## How it works
 
 For `video.mxf`, `treecheck` writes `video.mxf.sha256` containing that file's SHA-256 digest. On a later run it re-hashes `video.mxf` and compares.
@@ -130,7 +144,10 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 Parallel hashing (the default on multi-core machines) additionally uses an
 `xargs` built with `-P`. That flag is common but not POSIX; where it is
 missing the tool says so up front and `-j 1` always works with the core set
-alone.
+alone - an explicit serial run needs nothing from this tier. The live
+progress display runs only when stdout is a terminal and additionally uses
+`tail`, `head`, `awk`, `grep`, `mv` and `sleep`. `grep` belongs to this
+tier alone.
 
 ## License
 
