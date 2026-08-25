@@ -351,11 +351,18 @@ progress_monitor() {
             while IFS= read -r idx; do
                 [ -n "$idx" ] || continue
                 done=$((done+1))
-                # The completed index leaves the active set; grep finding
-                # nothing is not an error here.
+                # The completed index leaves the active set; grep status 1
+                # means nothing was left, which is fine. Anything else, or a
+                # failed replacement, degrades the display and says so.
+                local grc=0
                 grep -v "^${idx}"$'\t' "$ACTIVE" \
-                    > "$ACTIVE.new" 2>/dev/null || true
-                mv "$ACTIVE.new" "$ACTIVE"
+                    > "$ACTIVE.new" 2>/dev/null || grc=$?
+                if [ $grc -gt 1 ]; then
+                    printf '\r\033[Kcould not update the live file list\n'
+                fi
+                if ! mv "$ACTIVE.new" "$ACTIVE"; then
+                    printf '\r\033[Kcould not update the live file list\n'
+                fi
                 if ! printf '%s\n' "$idx" >> "$STREAMED_LOG" 2>/dev/null; then
                     printf '\r\033[Kcould not record a display ledger entry; that verdict will appear again in walk order\n'
                     continue
