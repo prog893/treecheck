@@ -363,7 +363,7 @@ progress_monitor() {
                 if ! mv "$ACTIVE.new" "$ACTIVE"; then
                     printf '\r\033[Kcould not update the live file list\n'
                 fi
-                if ! printf '%s\n' "$idx" >> "$STREAMED_LOG" 2>/dev/null; then
+                if ! printf '%s\n' "$idx" 2>/dev/null >> "$STREAMED_LOG"; then
                     printf '\r\033[Kcould not record a display ledger entry; that verdict will appear again in walk order\n'
                     continue
                 fi
@@ -405,7 +405,7 @@ progress_monitor() {
     if [ "$CONSUMED" -gt 0 ]; then
         while IFS= read -r idx; do
             [ -n "$idx" ] || continue
-            if ! printf '%s\n' "$idx" >> "$STREAMED_LOG" 2>/dev/null; then
+            if ! printf '%s\n' "$idx" 2>/dev/null >> "$STREAMED_LOG"; then
                 continue
             fi
             if [ -s "$RESULTS_DIR/$idx" ]; then
