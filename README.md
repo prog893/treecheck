@@ -139,14 +139,15 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 - `bash`
 - `shasum` (standard on macOS and Linux)
 - `find` with `-print0` support
-- standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`, `grep`
+- standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`
 
 Parallel hashing (the default on multi-core machines) additionally uses an
 `xargs` built with `-P`. That flag is common but not POSIX; where it is
 missing the tool says so up front and `-j 1` always works with the core set
 alone - an explicit serial run needs nothing from this tier. The live
 progress display runs only when stdout is a terminal and additionally uses
-`tail`, `head`, `awk`, `grep`, `mv` and `sleep`.
+`tail`, `head`, `awk`, `grep`, `mv` and `sleep`. `grep` belongs to this
+tier alone.
 
 ## License
 

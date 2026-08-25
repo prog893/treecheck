@@ -79,7 +79,7 @@ cleanup_tmp() {
     [ -n "${INFLIGHT:-}" ] && rm -f "$INFLIGHT"
     [ -n "${DONE_LOG:-}" ] && rm -f "$DONE_LOG"
     [ -n "${MONBUF:-}" ] && rm -f "$MONBUF"
-    [ -n "${ACTIVE:-}" ] && rm -f "$ACTIVE"
+    [ -n "${ACTIVE:-}" ] && rm -f "$ACTIVE" "$ACTIVE.new"
     [ -n "${STREAMED_LOG:-}" ] && rm -f "$STREAMED_LOG"
     [ -n "${NEEDS_PRINT:-}" ] && rm -f "$NEEDS_PRINT"
     [ -n "${ALL_IDX:-}" ] && rm -f "$ALL_IDX"
@@ -398,7 +398,10 @@ progress_monitor() {
         sleep 0.5
     done
     # Final drain for events that landed between the last poll and exit.
-    consume_new "$DONE_LOG" "$doff"
+    # On a failed read the ordered replay picks everything up anyway.
+    if ! consume_new "$DONE_LOG" "$doff"; then
+        printf '\r\033[Kprogress events unreadable\n'
+    fi
     if [ "$CONSUMED" -gt 0 ]; then
         while IFS= read -r idx; do
             [ -n "$idx" ] || continue
@@ -452,10 +455,7 @@ parallel_process_files() {
     export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG
     export -f hash_worker verify_file_hash create_file_hash compute_hash
 
-    [ "$STREAMED" -eq 1 ] && echo "Hashing with $JOBS parallel workers..."
-    if [ "$STREAMED" -eq 0 ]; then
-        echo "Hashing with $JOBS parallel workers..."
-    fi
+    echo "Hashing with $JOBS parallel workers..."
 
     # Index and path travel as two NUL-separated arguments per worker. The
     # enumeration runs against a file, not a pipeline: inside `while | xargs`
