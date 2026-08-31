@@ -4,9 +4,12 @@ A single POSIX-ish bash script at `bin/treecheck`. No build step. Three
 dependency tiers:
 
 - Core (every run): `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`,
-  `mktemp`, `wc`, `sort`. The walk is sorted so two runs over one tree can be
-  diffed; that needs `sort -z`, which is not POSIX, so it is probed once and a
-  sort without it costs the ordering rather than the run.
+  `mktemp`, `wc`.
+- Ordered walk (optional, every run that can have it): a `sort` accepting
+  `-z` for NUL-separated records, which is not POSIX. It is probed once at
+  startup. Without it the walk keeps filesystem order and the run says so on
+  stderr; nothing else changes, and no verification result depends on it.
+  Sorting is a diffability property, not a correctness one.
 - Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
   `-P`, which is common but not POSIX; probed before dispatching instead of
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with

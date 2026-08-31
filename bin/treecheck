@@ -325,7 +325,7 @@ create_file_hash() {
             return 3
         fi
         if [ "$stored_hash" = "$current_hash" ]; then
-            echo "created and verified ✓"
+            echo "created, sidecar verified ✓"
             return 0
         else
             echo "created, but read-back mismatch! (sidecar: $stored_hash, computed: $current_hash)"
@@ -1074,6 +1074,12 @@ done
 # the run.
 if printf 'b\0a\0' | LC_ALL=C sort -z >/dev/null 2>&1; then
     SORT_NUL=1
+else
+    # Said out loud rather than degraded quietly. Ordering is a documented
+    # property of the output, and a reader comparing two runs needs to know
+    # why they will not line up. It goes to stderr so piped stdout stays
+    # exactly what it always was.
+    echo "treecheck: this sort cannot read NUL-separated records; walking in filesystem order" >&2
 fi
 
 # Resolve automatic worker count: one per CPU, on either platform.

@@ -51,7 +51,10 @@ ERROR: Completed with errors
 ```
 
 Files are visited in sorted order, so two runs over the same tree produce the
-same output and can be diffed against each other.
+same output and can be diffed against each other. Ordering the walk needs a
+`sort` that reads NUL-separated records (`sort -z`), which is not POSIX. It is
+probed once at startup; where it is missing, the walk runs in filesystem order
+instead and says so on stderr. Nothing else about the run changes.
 
 Every nonzero failure counter is followed by the files behind it, capped at
 twenty per category. Knowing that one file out of nine thousand is corrupt is
@@ -67,6 +70,13 @@ Each outcome is counted separately, because they mean very different things:
 | **Missing/empty** | No usable sidecar, either absent or empty. Run with `-c` to record one |
 | **Not verified** | Create mode with `-n`: a sidecar was written but never read back |
 | **I/O errors** | The file or its sidecar could not be read, or the sidecar could not be written |
+
+For a sidecar that already existed, `Verified` means the file was read and
+hashed and the result matched. For one this run just created, it means the
+sidecar was read back and matched the digest written to it, which is what the
+per-file line reports as `created, sidecar verified`. Creation hashes the file
+once; a sidecar recorded for a file that is being written to concurrently can
+still go stale, the same as one recorded a moment before the write.
 
 `Mismatched` and `I/O errors` are deliberately distinct. A mismatch means the bytes changed. An I/O error means the drive would not hand them over, which points at the hardware rather than at the data.
 
