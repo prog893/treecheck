@@ -15,14 +15,20 @@ dependency tiers:
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
   a fallback to 1. An explicit `-j 1` needs nothing from this tier.
 - Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
-  `grep`, `mv`, `sleep`, `du`. Never used for piped output.
+  `grep`, `mv`, `sleep`, `du`, `tput`. Never used for piped output. `tput cols`
+  keeps the status line inside one terminal row; a failure falls back to 80
+  columns, which is narrower than most terminals and so still cannot wrap.
 
 Sizes for the progress display come from `du -k`, not `stat`: `du -k` is
 spelled identically on BSD and GNU where `stat` needs `-f%z` on one and
-`-c%s` on the other. It reports allocated blocks rather than apparent size,
-which is the better weight anyway, since allocated blocks are what actually
-gets read. Every part of that path is optional: any failure leaves the
-display counting files, exactly as it did before.
+`-c%s` on the other. Those sizes are a **weighting heuristic, not a
+measurement of the work.** `du` reports allocated blocks while `shasum` hashes
+logical contents, so a sparse file weighs more than it costs to hash, and a
+hardlinked path `du` has already counted once weighs less. Neither affects any
+verification result: the weights exist only to make the percentage and the
+estimate track reality better than a file count does, which on a tree mixing
+multi-gigabyte originals with kilobyte metadata is a low bar. Every part of
+that path is optional, and any failure leaves the display counting files.
 
 Anything a minimal container strips beyond the tier it exercises is a real
 portability break.
@@ -66,6 +72,7 @@ fixture holding **all** outcome categories at once:
 | a failing run under `-j > 1` | prints `Completed with errors` on stderr, not just a nonzero exit |
 | Ctrl-C at any point of a `-j > 1` run | never `Completed successfully`; reports `Interrupted`, a `Not reached` count, exit 130, and no worker chatter after the prompt returns |
 | Ctrl-C during a `-j 1` run | no further file is hashed after the signal, exit 130 |
+| a **direct** `SIGTERM` to a `-j > 1` run (`kill <pid>`, not the group) | no worker survives the exit, exit 130 |
 | a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
 
 Normalize the `Elapsed:` line before diffing the two engines; it is wall
@@ -73,12 +80,18 @@ clock and legitimately differs between runs. Compare stderr as well as
 stdout. Comparing only stdout hid a parallel run that printed its summary and
 then exited 1 with no verdict banner at all, for as long as that bug existed.
 
-Test the interrupt with a **process-group** signal (`set -m`, then
-`kill -INT -$PID`), which is what Ctrl-C actually sends. `kill -TERM $PID` to a
-single background PID does not reproduce it, and a plain `kill -INT` to a
-background job from a non-interactive shell is ignored outright, so both will
-pass while real Ctrl-C is broken. Interrupt at several different moments, not
-one.
+Test the interrupt **both ways**, because they exercise different code. A
+**process-group** signal (`set -m`, then `kill -INT -$PID`) is what Ctrl-C
+sends, and it reaches the workers on its own. A **direct** `kill -TERM $PID`
+reaches only this script, and is the case that needs the handler to signal the
+worker group itself: `xargs` neither forwards a signal to children it has
+already started nor waits for them once killed, so workers otherwise keep
+hashing after the tool has exited. Check for surviving `shasum` processes
+afterwards, not just the exit status. `kill -TERM $PID` to a
+A plain `kill -INT` to a background job from a non-interactive shell is
+ignored outright, so that spelling passes while real Ctrl-C is broken.
+Interrupt at several different moments, not one, and confirm that a run which
+simply finished before the signal still exits 0.
 
 Confirm exit status every time, since it is a documented interface:
 

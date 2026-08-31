@@ -187,7 +187,21 @@ trap cleanup_tmp EXIT
 # it, which is where "Directory not empty" came from.
 on_interrupt() {
     INTERRUPTED=1
-    [ -n "${XPID:-}" ] && kill -TERM "$XPID" 2>/dev/null
+    # Signal the whole worker process group, not just xargs. xargs does not
+    # forward a signal to the children it has already started, and it does not
+    # wait for them once it is itself killed, so signalling it alone leaves
+    # live workers behind: they keep hashing after the tool has exited and
+    # write into a results directory that cleanup has already removed. The
+    # group form is what reaches them.
+    #
+    # The group only exists because the dispatch below enables job control for
+    # the launch, which is what puts the workers in a group of their own. The
+    # direct form is the fallback for the case where it did not. "-$XPID" can
+    # never name this shell's own group, since XPID is a child's pid.
+    if [ -n "${XPID:-}" ]; then
+        kill -TERM -"$XPID" 2>/dev/null ||
+        kill -TERM "$XPID" 2>/dev/null || true
+    fi
     return 0
 }
 trap on_interrupt INT TERM
@@ -815,9 +829,15 @@ parallel_process_files() {
     # whether an empty list still runs the command once.
     if [ "$TOTAL_FILES" -gt 0 ]; then
         if [ "$STREAMED" -eq 1 ]; then
+            # Job control for the launch alone, so the worker tree lands in a
+            # process group of its own and can be signalled as a unit. For a
+            # single background command "$!" is that group's leader; it would
+            # NOT be for a pipeline, where the leader is the first process.
+            set -m
             xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
                 < "$WORK_INPUT" >/dev/null &
             XPID=$!
+            set +m
             progress_monitor "$TOTAL_FILES" "$XPID"
             # Wait here rather than in the signal handler, so the engine's
             # exit status is actually observed. A status above 128 means it
@@ -830,8 +850,10 @@ parallel_process_files() {
             #
             # Waiting also has to happen before anything is cleaned up, or the
             # workers write their results into a directory that is already gone.
+            # Braced so job control's "Terminated" notice cannot reach stderr
+            # and diverge the two engines' output; the status still escapes.
             xrc=0
-            wait "$XPID" || xrc=$?
+            { wait "$XPID" || xrc=$?; } 2>/dev/null
             XPID=""
             [ "$xrc" -gt 128 ] && INTERRUPTED=1
             if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
@@ -839,9 +861,14 @@ parallel_process_files() {
                 exit 1
             fi
         else
-            xrc=0
+            set -m
             xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
-                < "$WORK_INPUT" >/dev/null || xrc=$?
+                < "$WORK_INPUT" >/dev/null &
+            XPID=$!
+            set +m
+            xrc=0
+            { wait "$XPID" || xrc=$?; } 2>/dev/null
+            XPID=""
             [ "$xrc" -gt 128 ] && INTERRUPTED=1
             if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
                 error "parallel hashing failed"
@@ -1163,8 +1190,14 @@ echo "Elapsed:         $(fmt_dur $((SECONDS-RUN_START)))"
 # that came back, not only on the interrupt flag, because the flag can be lost
 # to a subshell and "checked less than it claims, says nothing" is the one
 # failure this tool must not have.
-if [ "$INTERRUPTED" -eq 1 ] || [ "${CNT_UNREACHED:-0}" -gt 0 ]; then
+if [ "$INTERRUPTED" -eq 1 ]; then
     return 130
+fi
+# Records missing with no signal to account for them is a fault in this tool,
+# not a user interruption, and must not be reported as one. It is still a run
+# that checked less than it was asked to, so it cannot report clean either.
+if [ "${CNT_UNREACHED:-0}" -gt 0 ]; then
+    return 1
 fi
 if [ "$NO_VERIFY" -eq 0 ] && [ "$CNT_UNVERIFIED_AFTER_EVENT_FAIL" -gt 0 ]; then
     return 1
