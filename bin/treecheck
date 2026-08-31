@@ -560,7 +560,7 @@ consume_new() {
 # anything the better weight here: allocated blocks are what actually gets
 # read off the disk.
 collect_sizes() {
-    local usable="$1" total="$2" kb i=0
+    local usable="$1" total="$2" kb i=0 missing=0
     BYTES_OK=0
     TOTAL_KB=0
     SIZE_KB=()
@@ -592,7 +592,7 @@ collect_sizes() {
     # shellcheck disable=SC2094
     while IFS= read -r kb; do
         case "$kb" in
-            ''|*[!0-9]*) kb=0 ;;
+            ''|*[!0-9]*) missing=$((missing+1)); kb=0 ;;
         esac
         SIZE_KB[i]=$kb
         TOTAL_KB=$((TOTAL_KB+kb))
@@ -605,12 +605,17 @@ collect_sizes() {
                      if (t > 0) size[substr($0, t+1)] = substr($0, 1, t-1)
                      next
                  }
-                 { k = size[$0]; print (k == "" ? "0" : k) }
+                 # "-" for a path du returned nothing for, which is distinct from a
+        # file du genuinely reports as occupying zero blocks.
+        { k = size[$0]; print (k == "" ? "-" : k) }
                ' - "$ORDERED_PATHS" 2>/dev/null)
 
     # One weight per dispatched file or none at all: a short list would put
-    # every index past the gap against the wrong size.
-    if [ "$i" -eq "$total" ] && [ "$TOTAL_KB" -gt 0 ]; then
+    # every index past the gap against the wrong size. A path du could not size
+    # is treated the same way rather than being silently weighted zero, since
+    # that would leave the percentage and the estimate running against totals
+    # that quietly omit whatever went missing after the walk.
+    if [ "$i" -eq "$total" ] && [ "$TOTAL_KB" -gt 0 ] && [ "$missing" -eq 0 ]; then
         BYTES_OK=1
     else
         TOTAL_KB=0
@@ -823,11 +828,21 @@ parallel_process_files() {
     done < "$FILE_LIST" > "$WORK_INPUT"
     TOTAL_FILES=$idx
 
+    # Skipped outright once interrupted: this walks every dispatched path
+    # through du, which on a large tree is not free, and it exists only to
+    # weight a progress display that is about to stop.
+    [ "$INTERRUPTED" -eq 1 ] && sizes_ok=0
     collect_sizes "$sizes_ok" "$TOTAL_FILES"
 
     # xargs is guarded against empty input because GNU and BSD disagree on
     # whether an empty list still runs the command once.
-    if [ "$TOTAL_FILES" -gt 0 ]; then
+    # An interrupt arriving during enumeration or sizing leaves XPID empty, so
+    # the handler has no worker group to signal and nothing stops the launch
+    # below. Without this gate the run would then hash the entire tree and only
+    # afterwards exit 130, having done exactly the work the interrupt asked it
+    # not to do. Nothing is dispatched, so replay counts every record as not
+    # reached.
+    if [ "$TOTAL_FILES" -gt 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
         if [ "$STREAMED" -eq 1 ]; then
             # Job control for the launch alone, so the worker tree lands in a
             # process group of its own and can be signalled as a unit. For a

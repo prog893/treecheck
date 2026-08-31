@@ -9,7 +9,10 @@ dependency tiers:
   `-z` for NUL-separated records, which is not POSIX. It is probed once at
   startup. Without it the walk keeps filesystem order and the run says so on
   stderr; nothing else changes, and no verification result depends on it.
-  Sorting is a diffability property, not a correctness one.
+  Sorting is a diffability property, not a correctness one, and it describes
+  **completed** walks: an interrupted run stops at whatever point it reached,
+  so its counters, its recap and the set of files it covered are all partial
+  and are not comparable against a full run.
 - Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
   `-P`, which is common but not POSIX; probed before dispatching instead of
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
@@ -17,18 +20,24 @@ dependency tiers:
 - Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
   `grep`, `mv`, `sleep`, `du`, `tput`. Never used for piped output. `tput cols`
   keeps the status line inside one terminal row; a failure falls back to 80
-  columns, which is narrower than most terminals and so still cannot wrap.
+  columns, which is best effort rather than a guarantee, since a terminal
+  narrower than 80 columns will still wrap and strand a row.
 
 Sizes for the progress display come from `du -k`, not `stat`: `du -k` is
 spelled identically on BSD and GNU where `stat` needs `-f%z` on one and
 `-c%s` on the other. Those sizes are a **weighting heuristic, not a
 measurement of the work.** `du` reports allocated blocks while `shasum` hashes
-logical contents, so a sparse file weighs more than it costs to hash, and a
-hardlinked path `du` has already counted once weighs less. Neither affects any
-verification result: the weights exist only to make the percentage and the
-estimate track reality better than a file count does, which on a tree mixing
-multi-gigabyte originals with kilobyte metadata is a low bar. Every part of
-that path is optional, and any failure leaves the display counting files.
+logical contents, and the two diverge in both directions: block rounding makes
+a one-byte file weigh a whole block more than it costs, a sparse file's holes
+are hashed but never allocated so it weighs less than it costs, and a second
+path to an inode `du` has already counted in that invocation carries no weight
+at all while still being hashed in full. None of it affects any verification
+result. The weights exist only to make the percentage and the estimate track
+reality better than a file count does, which on a tree mixing multi-gigabyte
+originals with kilobyte metadata is a low bar. A path `du` returns nothing for
+is not treated as weighing zero: the display drops back to counting files
+rather than run against totals that omit it. Every part of that path is
+optional, and any failure leaves the display counting files.
 
 Anything a minimal container strips beyond the tier it exercises is a real
 portability break.

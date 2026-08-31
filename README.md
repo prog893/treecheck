@@ -50,9 +50,11 @@ Elapsed:         4m12s
 ERROR: Completed with errors
 ```
 
-Files are visited in sorted order, so two runs over the same tree visit files
-in the same order and can be diffed against each other once the `Elapsed:`
-line, which is wall clock, is normalized. Ordering the walk needs a
+Files are visited in sorted order, so two completed runs over the same tree
+visit files in the same order and can be diffed against each other once the
+`Elapsed:` line, which is wall clock, is normalized. An interrupted run stops
+wherever it got to, so its counters and recap cover only part of the tree and
+do not line up against a full run. Ordering the walk needs a
 `sort` that reads NUL-separated records (`sort -z`), which is not POSIX. It is
 probed once at startup; where it is missing, the walk runs in filesystem order
 instead and says so on stderr. Nothing else about the run changes.
@@ -149,7 +151,8 @@ status line falls back to counting files and drops the estimate rather than
 showing one it cannot support. Sizes and rates use binary units, because `du`
 reports kibibytes: a `GiB` here is 1024 MiB, not 1000 MB.
 
-The status line is truncated to a single terminal row. It is erased by
+The status line is truncated to a single terminal row, using the width
+reported by `tput cols`, or 80 columns if that fails. It is erased by
 returning to column zero and clearing to end of line, and the row a terminal
 returns to is the last one, so a status line allowed to wrap would leave its
 first row stranded in the scrollback for the rest of the run.
