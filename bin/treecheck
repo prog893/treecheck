@@ -453,11 +453,17 @@ collect_sizes() {
     # FIRST tab only, since a path may legitimately contain one. awk reads
     # du's output from stdin ("-") and then the ordered list, so the second
     # pass emits exactly one weight per dispatched file, in dispatch order.
+    # SC2094 flags the ordered list appearing twice in one pipeline. Both
+    # uses are reads (tr feeds xargs the paths, awk re-reads them to emit one
+    # weight per file in order) and nothing in the pipeline writes to it, so
+    # there is no read-write hazard to avoid. Verified: the check fires on
+    # two plain reads with no writer present.
+    # shellcheck disable=SC2094
     while IFS= read -r kb; do
         case "$kb" in
             ''|*[!0-9]*) kb=0 ;;
         esac
-        SIZE_KB[$i]=$kb
+        SIZE_KB[i]=$kb
         TOTAL_KB=$((TOTAL_KB+kb))
         i=$((i+1))
     done < <(tr '\n' '\0' < "$ORDERED_PATHS" 2>/dev/null \
