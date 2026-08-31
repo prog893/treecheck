@@ -27,11 +27,12 @@ SORT_NUL=0
 # Wall-clock start, stamped before the walk so the summary can report it.
 RUN_START=0
 
-# Set when the run is interrupted. Ctrl-C reaches the whole foreground process
-# group, so the workers die on their own; what this flag is for is telling the
-# replay that missing results are expected rather than an internal fault, and
-# telling the summary to report what was reached instead of pretending the
-# walk completed.
+# Set when the run is interrupted. The workers do NOT die on their own: the
+# dispatch puts them in a process group of their own, so a terminal's Ctrl-C
+# reaches this script and not them, and the handler below is what stops them.
+# Nothing that decides an outcome reads this flag, because a trap firing inside
+# a command substitution runs in that subshell and the assignment is lost; it
+# only selects the wording and the exit code once the facts are already in.
 INTERRUPTED=0
 XPID=""
 
@@ -152,7 +153,13 @@ remove_tmp_dir() {
         echo "treecheck: refusing to delete directory $d: not one of this run's temporary directories" >&2
         return 0
     fi
-    rm -f "$d"/* || true
+    # Batched rather than globbed. One result file per dispatched record means
+    # the glob becomes an argument list as long as the tree, and rm fails with
+    # E2BIG on a large one; the failure was swallowed, rmdir then declined the
+    # still-populated directory, and the whole thing leaked into TMPDIR.
+    # "-exec rm -f {} +" batches within the platform limit, and -maxdepth 1
+    # keeps this from descending, so the removal stays non-recursive.
+    find "$d" -maxdepth 1 -type f -exec rm -f {} + 2>/dev/null || true
     rmdir "$d" 2>/dev/null || true
     return 0
 }
@@ -181,10 +188,12 @@ trap cleanup_tmp EXIT
 # It should leave the terminal tidy and report what was actually verified, not
 # abandon the run mid-sentence.
 #
-# The workers have already received the same signal, since Ctrl-C goes to the
-# whole foreground process group. Waiting for them here is what keeps the
-# temporary directory from being removed while a worker is still writing into
-# it, which is where "Directory not empty" came from.
+# This handler signals; it does not wait. The wait lives in the main flow, both
+# because that is where the engine's exit status can actually be observed and
+# because waiting there is what orders worker exit before cleanup runs. Waiting
+# here instead consumed the status and still let the temporary directory be
+# removed underneath a live worker, which is where "Directory not empty" came
+# from.
 on_interrupt() {
     INTERRUPTED=1
     # Signal the whole worker process group, not just xargs. xargs does not
@@ -584,6 +593,14 @@ collect_sizes() {
     # FIRST tab only, since a path may legitimately contain one. awk reads
     # du's output from stdin ("-") and then the ordered list, so the second
     # pass emits exactly one weight per dispatched file, in dispatch order.
+    # The ordered path list is read in lockstep so a path the batch could not
+    # size can be named and asked about directly. That is the common case for
+    # hardlinks: du reports an inode once per invocation, so every additional
+    # path to it comes back empty, and treating those as unsizable would drop
+    # byte weighting for the whole run on any tree containing one. Asked on its
+    # own, du reports the real allocation. A path that still yields nothing has
+    # genuinely gone, and only that disables the weighting.
+    exec 5< "$ORDERED_PATHS"
     # SC2094 flags the ordered list appearing twice in one pipeline. Both
     # uses are reads (tr feeds xargs the paths, awk re-reads them to emit one
     # weight per file in order) and nothing in the pipeline writes to it, so
@@ -591,8 +608,15 @@ collect_sizes() {
     # two plain reads with no writer present.
     # shellcheck disable=SC2094
     while IFS= read -r kb; do
+        IFS= read -r pth <&5 || pth=""
         case "$kb" in
-            ''|*[!0-9]*) missing=$((missing+1)); kb=0 ;;
+            ''|*[!0-9]*)
+                kb=""
+                [ -n "$pth" ] && kb=$(du -k "$pth" 2>/dev/null | awk 'NR==1{print $1}')
+                case "$kb" in
+                    ''|*[!0-9]*) missing=$((missing+1)); kb=0 ;;
+                esac
+                ;;
         esac
         SIZE_KB[i]=$kb
         TOTAL_KB=$((TOTAL_KB+kb))
@@ -609,6 +633,7 @@ collect_sizes() {
         # file du genuinely reports as occupying zero blocks.
         { k = size[$0]; print (k == "" ? "-" : k) }
                ' - "$ORDERED_PATHS" 2>/dev/null)
+    exec 5<&-
 
     # One weight per dispatched file or none at all: a short list would put
     # every index past the gap against the wrong size. A path du could not size

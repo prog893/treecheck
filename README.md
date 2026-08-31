@@ -152,15 +152,22 @@ showing one it cannot support. Sizes and rates use binary units, because `du`
 reports kibibytes: a `GiB` here is 1024 MiB, not 1000 MB.
 
 The status line is truncated to a single terminal row, using the width
-reported by `tput cols`, or 80 columns if that fails. It is erased by
+reported by `tput cols`, or 80 columns if that fails. That fallback is best
+effort rather than a guarantee: a terminal narrower than 80 columns can still
+wrap it. It is erased by
 returning to column zero and clearing to end of line, and the row a terminal
 returns to is the last one, so a status line allowed to wrap would leave its
 first row stranded in the scrollback for the rest of the run.
 
 The status line exists only on a terminal. Piped or redirected output carries
-none of it: every verdict appears exactly once, in walk order, with no control
-characters, so it can go through `grep` or into a log. The final `Elapsed`
-line is printed either way.
+none of it: every verdict appears exactly once, in walk order, so it can go
+through `grep` or into a log. The final `Elapsed` line is printed either way.
+
+Parallel output additionally carries no control characters, because a path
+holding a newline or a `0x01` byte is refused before any hashing starts and the
+run tells you to use `-j 1`. Serial output makes no such promise: `-j 1`
+supports those paths and prints them as they are, so a verdict line can span
+more than one line when a filename does.
 
 ## How it works
 

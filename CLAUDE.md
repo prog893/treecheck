@@ -96,7 +96,7 @@ reaches only this script, and is the case that needs the handler to signal the
 worker group itself: `xargs` neither forwards a signal to children it has
 already started nor waits for them once killed, so workers otherwise keep
 hashing after the tool has exited. Check for surviving `shasum` processes
-afterwards, not just the exit status. `kill -TERM $PID` to a
+afterward, not just the exit status. `kill -TERM $PID` to a
 A plain `kill -INT` to a background job from a non-interactive shell is
 ignored outright, so that spelling passes while real Ctrl-C is broken.
 Interrupt at several different moments, not one, and confirm that a run which
