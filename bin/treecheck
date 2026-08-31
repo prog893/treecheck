@@ -27,6 +27,14 @@ SORT_NUL=0
 # Wall-clock start, stamped before the walk so the summary can report it.
 RUN_START=0
 
+# Set when the run is interrupted. Ctrl-C reaches the whole foreground process
+# group, so the workers die on their own; what this flag is for is telling the
+# replay that missing results are expected rather than an internal fault, and
+# telling the summary to report what was reached instead of pretending the
+# walk completed.
+INTERRUPTED=0
+XPID=""
+
 # Byte weights for the live progress display, filled by collect_sizes. Zero
 # means the display counts files instead, which is always a valid fallback.
 BYTES_OK=0
@@ -89,39 +97,140 @@ validate_jobs() {
 }
 
 FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT="" STREAMED=0
+
+# Every path this script deletes comes from mktemp, and nothing else is ever
+# eligible. That invariant used to be implicit: it held only because each
+# variable happened to have been assigned from mktemp, with nothing at the
+# point of deletion stopping a future edit from putting a walked path into one
+# of them. It is enforced here instead, so no bug upstream can turn into the
+# deletion of someone's data. Refusing leaks a temp file, which is the safe
+# direction to fail in.
+#
+# There is deliberately no recursive delete anywhere in this script.
+TMP_PREFIX="${TMPDIR:-/tmp}/treecheck."
+
+is_our_tmp() {
+    local p="$1"
+    [ -n "$p" ] || return 1
+    # Must sit directly under the temp prefix mktemp was called with, and must
+    # carry at least one character of mktemp's random suffix after it.
+    case "$p" in
+        "$TMP_PREFIX"?*) : ;;
+        *) return 1 ;;
+    esac
+    # No traversal, no newline: neither can occur in a mktemp path, so either
+    # one means the value did not come from where it is supposed to have.
+    case "$p" in
+        *..*) return 1 ;;
+        *$'\n'*) return 1 ;;
+    esac
+    return 0
+}
+
+remove_tmp() {
+    local p
+    for p in "$@"; do
+        [ -n "$p" ] || continue
+        if ! is_our_tmp "$p"; then
+            echo "treecheck: refusing to delete $p: not one of this run's temporary files" >&2
+            continue
+        fi
+        rm -f "$p" || true
+    done
+    return 0
+}
+
+# The results directory is flat by construction: one result file per record,
+# no subdirectories. So it needs no recursive delete, and rmdir declining a
+# directory that still holds something turns a surprise into a visible error
+# rather than a silent recursive wipe.
+remove_tmp_dir() {
+    local d="$1"
+    [ -n "$d" ] || return 0
+    if ! is_our_tmp "$d"; then
+        echo "treecheck: refusing to delete directory $d: not one of this run's temporary directories" >&2
+        return 0
+    fi
+    rm -f "$d"/* || true
+    rmdir "$d" 2>/dev/null || true
+    return 0
+}
+
 cleanup_tmp() {
-    [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST" "$FILE_LIST.sorted"
-    [ -n "$FIND_ERR" ] && rm -f "$FIND_ERR" "$FIND_ERR.all"
-    [ -n "${ORDERED_PATHS:-}" ] && rm -f "$ORDERED_PATHS"
-    [ -n "$RESULTS_DIR" ] && rm -rf "$RESULTS_DIR"
-    [ -n "$WORK_INPUT" ] && rm -f "$WORK_INPUT"
-    [ -n "${CREATED_LOG:-}" ] && rm -f "$CREATED_LOG"
-    [ -n "${INFLIGHT:-}" ] && rm -f "$INFLIGHT"
-    [ -n "${DONE_LOG:-}" ] && rm -f "$DONE_LOG"
-    [ -n "${MONBUF:-}" ] && rm -f "$MONBUF"
-    [ -n "${ACTIVE:-}" ] && rm -f "$ACTIVE" "$ACTIVE.new"
-    [ -n "${STREAMED_LOG:-}" ] && rm -f "$STREAMED_LOG"
-    [ -n "${NEEDS_PRINT:-}" ] && rm -f "$NEEDS_PRINT"
-    [ -n "${ALL_IDX:-}" ] && rm -f "$ALL_IDX"
+    # Erase the status line on the way out. Ctrl-C during a long run otherwise
+    # leaves a half-drawn bar sitting above the next shell prompt.
+    [ "$STREAMED" -eq 1 ] && [ -t 1 ] && printf '\r\033[K'
+    # The derived names use ${VAR:+...} so that an unset base contributes
+    # nothing at all. Spelled "${VAR:-}.sorted" they would collapse to the
+    # bare suffix ".sorted" whenever the base was unset, which the guard then
+    # correctly refused and reported, on every run that exits before the walk
+    # starts (treecheck -h among them).
+    remove_tmp "$FILE_LIST" "${FILE_LIST:+$FILE_LIST.sorted}" \
+               "$FIND_ERR" "${FIND_ERR:+$FIND_ERR.all}" \
+               "${ORDERED_PATHS:-}" "$WORK_INPUT" \
+               "${CREATED_LOG:-}" "${INFLIGHT:-}" "${DONE_LOG:-}" \
+               "${MONBUF:-}" "${ACTIVE:-}" "${ACTIVE:+$ACTIVE.new}" \
+               "${STREAMED_LOG:-}" "${NEEDS_PRINT:-}" "${ALL_IDX:-}"
+    remove_tmp_dir "$RESULTS_DIR"
     return 0
 }
 trap cleanup_tmp EXIT
+
+# An interrupt is a normal way to stop a scan that is going to take an hour.
+# It should leave the terminal tidy and report what was actually verified, not
+# abandon the run mid-sentence.
+#
+# The workers have already received the same signal, since Ctrl-C goes to the
+# whole foreground process group. Waiting for them here is what keeps the
+# temporary directory from being removed while a worker is still writing into
+# it, which is where "Directory not empty" came from.
+on_interrupt() {
+    INTERRUPTED=1
+    if [ -n "${XPID:-}" ]; then
+        kill -TERM "$XPID" 2>/dev/null || true
+        wait "$XPID" 2>/dev/null || true
+        XPID=""
+    fi
+    return 0
+}
+trap on_interrupt INT TERM
+
 success() { echo -e "${GREEN}✓ $*${NC}"; }
 
 # Sizes travel as kibibytes because that is what du reports, and the whole
 # progress display is integer arithmetic: bash has no floats, so the one
 # fractional digit is produced by scaling the remainder before dividing.
+# The unit suffixes are the binary ones, because the numbers are binary: du -k
+# reports kibibytes, so a thousand of them is a MiB and not a MB. Writing MB
+# here would be off by 5% at that scale and 10% by TiB.
 human_kb() {
     local kb="$1"
     if [ "$kb" -lt 1024 ]; then
-        printf '%dK' "$kb"
+        printf '%dKiB' "$kb"
     elif [ "$kb" -lt 1048576 ]; then
-        printf '%d.%dM' $((kb/1024)) $((kb%1024*10/1024))
+        printf '%d.%dMiB' $((kb/1024)) $((kb%1024*10/1024))
     elif [ "$kb" -lt 1073741824 ]; then
-        printf '%d.%dG' $((kb/1048576)) $((kb%1048576*10/1048576))
+        printf '%d.%dGiB' $((kb/1048576)) $((kb%1048576*10/1048576))
     else
-        printf '%d.%dT' $((kb/1073741824)) $((kb%1073741824*10/1073741824))
+        printf '%d.%dTiB' $((kb/1073741824)) $((kb%1073741824*10/1073741824))
     fi
+}
+
+# Width of the terminal, for keeping the status line to a single row.
+#
+# This matters more than it looks. The status line is erased by returning to
+# column zero and clearing to end of line, and "the line" a terminal returns
+# to is the last DISPLAY row. A status line longer than the terminal wraps
+# onto a second row, after which the first row can never be erased and stays
+# behind in the scrollback for the rest of the run. Every status line is
+# therefore truncated to one row before it is drawn.
+term_cols() {
+    local c=""
+    c=$(tput cols 2>/dev/null) || c=""
+    case "$c" in
+        ''|*[!0-9]*|0) c=80 ;;
+    esac
+    printf '%s' "$c"
 }
 
 # Durations read as a duration rather than a raw second count, which stops
@@ -504,7 +613,8 @@ progress_monitor() {
     # size never exceeds the number of workers actually mid-file.
     local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
     local inflight rate_x10 pct a1 a2 a3 done_kb=0 elapsed rate_kb eta
-    while kill -0 "$xpid" 2>/dev/null; do
+    local cols statusline
+    while [ "$INTERRUPTED" -eq 0 ] && kill -0 "$xpid" 2>/dev/null; do
         if ! consume_new "$INFLIGHT" "$ioff"; then
             printf '\r\033[Kprogress events unreadable; retrying\n'
             sleep 0.5
@@ -567,6 +677,9 @@ progress_monitor() {
         [ -n "$a2" ] && inflight="${inflight:+$inflight, }$a2"
         [ -n "$a3" ] && inflight="${inflight:+$inflight, }$a3"
         elapsed=$((SECONDS-start))
+        # Re-read every tick so a mid-run resize cannot reintroduce a wrapped
+        # row that nothing is able to erase afterwards.
+        cols=$(term_cols)
         if [ "$BYTES_OK" -eq 1 ]; then
             # Throughput over the whole run so far, not an instantaneous
             # sample: a per-tick rate on a mix of huge and tiny files swings
@@ -579,11 +692,12 @@ progress_monitor() {
             else
                 eta="--"
             fi
-            printf '\r\033[K %s %d/%d %d%% %s/%s %s %s/s eta %s hashing: %s' \
+            statusline=$(printf ' %s %d/%d %d%% %s/%s %s %s/s eta %s hashing: %s' \
                 "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
                 "$(human_kb "$done_kb")" "$(human_kb "$TOTAL_KB")" \
                 "$(fmt_dur "$elapsed")" "$(human_kb "$rate_kb")" "$eta" \
-                "${inflight:-...}"
+                "${inflight:-...}")
+            printf '\r\033[K%s' "${statusline:0:$((cols-1))}"
         else
             # No usable sizes, so the percentage falls back to the file count
             # and there is nothing honest to base an estimate on.
@@ -592,10 +706,11 @@ progress_monitor() {
             [ "$elapsed" -gt 0 ] && rate_x10=$((done*10/elapsed))
             pct=0
             if [ "$total" -gt 0 ]; then pct=$((done*100/total)); fi
-            printf '\r\033[K %s %d/%d %d%% %s %d.%d files/s hashing: %s' \
+            statusline=$(printf ' %s %d/%d %d%% %s %d.%d files/s hashing: %s' \
                 "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
                 "$(fmt_dur "$elapsed")" "$((rate_x10/10))" "$((rate_x10%10))" \
-                "${inflight:-...}"
+                "${inflight:-...}")
+            printf '\r\033[K%s' "${statusline:0:$((cols-1))}"
         fi
         spin=$((spin+1))
         sleep 0.5
@@ -703,7 +818,11 @@ parallel_process_files() {
                 < "$WORK_INPUT" >/dev/null &
             XPID=$!
             progress_monitor "$TOTAL_FILES" "$XPID"
-            wait "$XPID" || { error "parallel hashing failed"; exit 1; }
+            if [ -n "$XPID" ]; then
+                wait "$XPID" || [ "$INTERRUPTED" -eq 1 ] || {
+                    error "parallel hashing failed"; exit 1; }
+            fi
+            XPID=""
         else
             xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
                 < "$WORK_INPUT" >/dev/null || { error "parallel hashing failed"; exit 1; }
@@ -733,7 +852,7 @@ parallel_process_files() {
             error "could not determine which verdicts the live view missed"
             exit 1
         fi
-        rm -f "$ALL_IDX"
+        remove_tmp "$ALL_IDX"
         if [ -s "$NEEDS_PRINT" ]; then
             exec 3< "$NEEDS_PRINT"
             IFS= read -r -u 3 NP_NEXT || NP_NEXT=""
@@ -760,6 +879,13 @@ parallel_process_files() {
         # tool must never have. Sequential mode handles such trees correctly.
         RESULT_FILE="$RESULTS_DIR/$expected"
         if [ ! -s "$RESULT_FILE" ]; then
+            # After an interrupt most records legitimately never arrived. They
+            # are counted as unreached and the run says so, rather than being
+            # treated as the internal fault they would be in a complete run.
+            if [ "$INTERRUPTED" -eq 1 ]; then
+                CNT_UNREACHED=$((CNT_UNREACHED+1))
+                continue
+            fi
             error "internal: no result arrived for record $expected"
             error "rerun with -j 1 and report this output"
             exit 1
@@ -786,7 +912,9 @@ parallel_process_files() {
         if [ "$STREAMED" -eq 0 ]; then
             echo "$line"
         elif [ -n "$NP_NEXT" ] && [ "$expected" = "$NP_NEXT" ]; then
-            echo "$line"
+            # Erase the status line first. A bare echo here would print the
+            # verdict underneath it and leave the bar stranded in scrollback.
+            printf '\r\033[K%s\n' "$line"
             if IFS= read -r -u 3 NP_NEXT; then :; else NP_NEXT=""; fi
         fi
         case $rc in
@@ -836,7 +964,9 @@ parallel_process_files() {
         error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count in the summary below still includes them"
     fi
 
-    if [ "$CNT_SCANNED" -ne "$TOTAL_FILES" ]; then
+    # An interrupted run is expected to come back short by exactly the number
+    # of records it never reached.
+    if [ "$((CNT_SCANNED+CNT_UNREACHED))" -ne "$TOTAL_FILES" ]; then
         error "internal: $TOTAL_FILES files were dispatched but $CNT_SCANNED results came back"
         error "rerun with -j 1 and report this output"
         exit 1
@@ -848,6 +978,7 @@ process_files() {
     local find_expr=()
     CNT_SCANNED=0 CNT_OK=0 CNT_MISMATCH=0 CNT_MISSING=0 CNT_IOERR=0 CNT_CREATED=0 CNT_UNVERIFIED=0
     CNT_UNVERIFIED_AFTER_EVENT_FAIL=0
+    CNT_UNREACHED=0
 
     # Build find expression.
     #
@@ -895,7 +1026,7 @@ if [ $VERBOSE -eq 1 ]; then
     while IFS= read -r -d '' file; do
         all_files=$((all_files+1))
     done < "$FIND_ERR.all"
-    rm -f "$FIND_ERR.all"
+    remove_tmp "$FIND_ERR.all"
 fi
 
 # Run the walk to a file first so that its exit status survives. Inside a
@@ -921,7 +1052,7 @@ if [ "$SORT_NUL" -eq 1 ]; then
        mv "$FILE_LIST.sorted" "$FILE_LIST"; then
         :
     else
-        rm -f "$FILE_LIST.sorted"
+        remove_tmp "$FILE_LIST.sorted"
         error "could not sort the walk; continuing in filesystem order"
     fi
 fi
@@ -988,12 +1119,18 @@ print_failure_paths "$CNT_MISMATCH" ${MISMATCH_PATHS[@]+"${MISMATCH_PATHS[@]}"}
 echo "Missing/empty:   $CNT_MISSING"
 echo "I/O errors:      $CNT_IOERR"
 print_failure_paths "$CNT_IOERR" ${IOERR_PATHS[@]+"${IOERR_PATHS[@]}"}
+if [ "$CNT_UNREACHED" -gt 0 ]; then echo "Not reached:     $CNT_UNREACHED"; fi
 echo "Elapsed:         $(fmt_dur $((SECONDS-RUN_START)))"
 
 # A normal create run promises to read back what it wrote. Status 6 means a
 # sidecar was written but its read-back never happened because bookkeeping
 # failed first, so that run has not kept the promise and must not exit 0.
 # Under -c -n nothing was promised, so the warning alone stands.
+# An interrupted scan verified only part of the tree, so it can never report
+# the clean verdict no matter what the counters say.
+if [ "$INTERRUPTED" -eq 1 ]; then
+    return 130
+fi
 if [ "$NO_VERIFY" -eq 0 ] && [ "$CNT_UNVERIFIED_AFTER_EVENT_FAIL" -gt 0 ]; then
     return 1
 fi
@@ -1124,6 +1261,8 @@ fi
         0) success "Completed successfully" ;;
         2) echo -e "${YELLOW}Completed: nothing corrupt, but some files have no sidecar${NC}"
            exit 2 ;;
+        130) echo -e "${YELLOW}Interrupted: the counters above cover only the files reached${NC}"
+           exit 130 ;;
         *) error "Completed with errors"
            exit 1 ;;
     esac
