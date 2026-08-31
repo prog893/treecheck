@@ -69,6 +69,7 @@ EXIT STATUS:
   0   clean
   1   verification failed: a mismatch, an I/O error, or a failed walk
   2   nothing corrupt, but some files have no usable sidecar yet
+  130 interrupted: only the files reported as scanned were checked
 
 EXAMPLES:
   treecheck /Volumes/Media                   Verify the whole tree
@@ -1085,6 +1086,15 @@ if [ "$JOBS" -gt 1 ]; then
     parallel_process_files "$mode"
 else
 while IFS= read -r -d '' file; do
+    # An interrupt has to stop this loop, not merely be remembered by it.
+    # Without this the sequential engine kept hashing the whole remaining tree
+    # after Ctrl-C and only reported the interruption once it had finished,
+    # which is the opposite of what stopping a scan is for. Remaining records
+    # are counted so the summary still adds up to the number dispatched.
+    if [ "$INTERRUPTED" -eq 1 ]; then
+        CNT_UNREACHED=$((CNT_UNREACHED+1))
+        continue
+    fi
     CNT_SCANNED=$((CNT_SCANNED+1))
     file="$TARGET_DIR/${file#./}"
 

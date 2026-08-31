@@ -50,8 +50,9 @@ Elapsed:         4m12s
 ERROR: Completed with errors
 ```
 
-Files are visited in sorted order, so two runs over the same tree produce the
-same output and can be diffed against each other. Ordering the walk needs a
+Files are visited in sorted order, so two runs over the same tree visit files
+in the same order and can be diffed against each other once the `Elapsed:`
+line, which is wall clock, is normalized. Ordering the walk needs a
 `sort` that reads NUL-separated records (`sort -z`), which is not POSIX. It is
 probed once at startup; where it is missing, the walk runs in filesystem order
 instead and says so on stderr. Nothing else about the run changes.
@@ -86,7 +87,13 @@ still go stale, the same as one recorded a moment before the write.
 0   clean
 1   verification failed: a mismatch, an I/O error, or a failed directory walk
 2   nothing corrupt, but some files have no usable sidecar yet
+130 interrupted: only the files reported as scanned were checked
 ```
+
+Status 130 is what an interrupted run returns. Ctrl-C stops the scan rather
+than abandoning it: the summary reports the counters for the files actually
+reached plus a `Not reached` count, and an interrupted run never reports the
+clean verdict, whatever those counters say.
 
 Status 1 means the run could not confirm your data is intact. That covers three different situations: contents that changed, files the drive would not return, and a tree that could not be fully walked. Only the first is evidence of corruption, so read the counters rather than the exit code alone when diagnosing.
 
@@ -131,7 +138,7 @@ run is, bytes done out of bytes total, elapsed time, throughput, an estimate
 of the time remaining, and what is currently being hashed.
 
 ```text
- / 171/1949 42% 1.2T/2.9T 11m03s 340.5M/s eta 2h04m hashing: A008_07091214_C071.braw
+ / 171/1949 42% 1.2TiB/2.9TiB 11m03s 340.5MiB/s eta 2h04m hashing: A008_07091214_C071.braw
 ```
 
 The percentage and the estimate are weighted by bytes, not by file count. A
@@ -139,7 +146,13 @@ media tree mixes multi-gigabyte originals with kilobyte metadata files, so
 "171 of 1949 files" can mean anything between one percent and ninety-nine
 percent of the actual work. Sizes come from `du`; if it is unavailable the
 status line falls back to counting files and drops the estimate rather than
-showing one it cannot support.
+showing one it cannot support. Sizes and rates use binary units, because `du`
+reports kibibytes: a `GiB` here is 1024 MiB, not 1000 MB.
+
+The status line is truncated to a single terminal row. It is erased by
+returning to column zero and clearing to end of line, and the row a terminal
+returns to is the last one, so a status line allowed to wrap would leave its
+first row stranded in the scrollback for the rest of the run.
 
 The status line exists only on a terminal. Piped or redirected output carries
 none of it: every verdict appears exactly once, in walk order, with no control
@@ -170,14 +183,18 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 - `shasum` (standard on macOS and Linux)
 - `find` with `-print0` support
 - standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`
+- `sort` accepting `-z`, for the ordered walk only; without it the walk keeps
+  filesystem order and says so, and nothing else changes
 
 Parallel hashing (the default on multi-core machines) additionally uses an
 `xargs` built with `-P`. That flag is common but not POSIX; where it is
 missing the tool says so up front and `-j 1` always works with the core set
 alone - an explicit serial run needs nothing from this tier. The live
 progress display runs only when stdout is a terminal and additionally uses
-`tail`, `head`, `awk`, `grep`, `mv` and `sleep`. `grep` belongs to this
-tier alone.
+`tail`, `head`, `awk`, `grep`, `mv`, `sleep`, `tput` and `du`. `grep` belongs
+to this tier alone. `du` supplies the byte weights behind the percentage and
+the estimate; without it the display counts files instead and drops the
+estimate.
 
 ## License
 
