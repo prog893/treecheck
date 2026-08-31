@@ -64,12 +64,20 @@ fixture holding **all** outcome categories at once:
 | same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`), identical **stderr**, identical exit status |
 | path containing a newline or `0x01` under `-j > 1` | refused before any hashing, exit 1, message names `-j 1` |
 | a failing run under `-j > 1` | prints `Completed with errors` on stderr, not just a nonzero exit |
+| Ctrl-C at any point of a `-j > 1` run | never `Completed successfully`; reports `Interrupted`, a `Not reached` count, exit 130, and no worker chatter after the prompt returns |
 | a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
 
 Normalize the `Elapsed:` line before diffing the two engines; it is wall
 clock and legitimately differs between runs. Compare stderr as well as
 stdout. Comparing only stdout hid a parallel run that printed its summary and
 then exited 1 with no verdict banner at all, for as long as that bug existed.
+
+Test the interrupt with a **process-group** signal (`set -m`, then
+`kill -INT -$PID`), which is what Ctrl-C actually sends. `kill -TERM $PID` to a
+single background PID does not reproduce it, and a plain `kill -INT` to a
+background job from a non-interactive shell is ignored outright, so both will
+pass while real Ctrl-C is broken. Interrupt at several different moments, not
+one.
 
 Confirm exit status every time, since it is a documented interface:
 
@@ -115,6 +123,20 @@ README option list still agree. They have drifted apart before.
   function substitutes must come from the environment, not from an ANSI-C
   literal at the point of use. The pattern side round-trips; the replacement
   side does not.
+- A trap that fires while the shell is sitting inside a command substitution
+  runs **in that subshell**, so an assignment it makes is discarded and the
+  parent never sees it. An INT handler setting `INTERRUPTED=1` was therefore
+  unreliable exactly in the monitor loop, which is dense with `$(...)` calls,
+  and a Ctrl-C could be swallowed into reporting `Completed successfully` on a
+  run that had checked 52 of 1949 files. Never let a verdict depend on a flag a
+  trap sets: derive it from a fact the parent observes directly, here the
+  engine's wait status (above 128 means it died from a signal) plus the count of
+  results that actually came back.
+- `wait` belongs in the main flow, not in the signal handler. Waiting in the
+  handler consumed the status the main flow needed, and cleaning up before the
+  workers were gone left them writing results into a deleted directory, which
+  the shell reports as "No such file or directory" after the prompt has already
+  returned.
 - `! -path "*/.*"` filters hidden entries out of results but does **not** stop
   `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
   walk starts at `.`, which a bare `.*` matches, pruning the entire tree.

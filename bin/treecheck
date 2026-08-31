@@ -186,11 +186,7 @@ trap cleanup_tmp EXIT
 # it, which is where "Directory not empty" came from.
 on_interrupt() {
     INTERRUPTED=1
-    if [ -n "${XPID:-}" ]; then
-        kill -TERM "$XPID" 2>/dev/null || true
-        wait "$XPID" 2>/dev/null || true
-        XPID=""
-    fi
+    [ -n "${XPID:-}" ] && kill -TERM "$XPID" 2>/dev/null
     return 0
 }
 trap on_interrupt INT TERM
@@ -491,8 +487,12 @@ hash_worker() {
     # file is only collision-free while every write stays under the stdio
     # buffer size, and a deep path plus a mismatch diagnostic can exceed
     # that; interleaved halves would corrupt the stream.
+    # stderr silenced BEFORE the target is named: an interrupted run can tear
+    # the results directory down while a worker is still finishing, and the
+    # shell would otherwise print its own "No such file or directory" for each
+    # one, after the summary and even after the prompt has come back.
     printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out" \
-        > "$RESULTS_DIR/$i"
+        2>/dev/null > "$RESULTS_DIR/$i"
     if [ -n "${DONE_LOG:-}" ]; then
         # A lost event means the live view skips this verdict; the ordered
         # replay detects that and prints it at the end, so the failure must
@@ -818,14 +818,34 @@ parallel_process_files() {
                 < "$WORK_INPUT" >/dev/null &
             XPID=$!
             progress_monitor "$TOTAL_FILES" "$XPID"
-            if [ -n "$XPID" ]; then
-                wait "$XPID" || [ "$INTERRUPTED" -eq 1 ] || {
-                    error "parallel hashing failed"; exit 1; }
-            fi
+            # Wait here rather than in the signal handler, so the engine's
+            # exit status is actually observed. A status above 128 means it
+            # died from a signal, which is read as the interruption instead of
+            # trusting the handler's flag: a trap that fires while the shell
+            # sits inside a command substitution runs in THAT SUBSHELL, so its
+            # assignment to INTERRUPTED is discarded and the parent never sees
+            # it. This loop is full of command substitutions, so that window is
+            # wide. Deriving it from the status cannot be missed.
+            #
+            # Waiting also has to happen before anything is cleaned up, or the
+            # workers write their results into a directory that is already gone.
+            xrc=0
+            wait "$XPID" || xrc=$?
             XPID=""
+            [ "$xrc" -gt 128 ] && INTERRUPTED=1
+            if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
+                error "parallel hashing failed"
+                exit 1
+            fi
         else
+            xrc=0
             xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
-                < "$WORK_INPUT" >/dev/null || { error "parallel hashing failed"; exit 1; }
+                < "$WORK_INPUT" >/dev/null || xrc=$?
+            [ "$xrc" -gt 128 ] && INTERRUPTED=1
+            if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
+                error "parallel hashing failed"
+                exit 1
+            fi
         fi
     fi
 
@@ -879,16 +899,13 @@ parallel_process_files() {
         # tool must never have. Sequential mode handles such trees correctly.
         RESULT_FILE="$RESULTS_DIR/$expected"
         if [ ! -s "$RESULT_FILE" ]; then
-            # After an interrupt most records legitimately never arrived. They
-            # are counted as unreached and the run says so, rather than being
-            # treated as the internal fault they would be in a complete run.
-            if [ "$INTERRUPTED" -eq 1 ]; then
-                CNT_UNREACHED=$((CNT_UNREACHED+1))
-                continue
-            fi
-            error "internal: no result arrived for record $expected"
-            error "rerun with -j 1 and report this output"
-            exit 1
+            # Counted, never fatal here, and never gated on the interrupt
+            # flag. Whether a missing result is an interrupted run or an
+            # internal fault is decided after the replay, from the count; what
+            # matters at this point is that a run missing any result can no
+            # longer reach the clean verdict by any path.
+            CNT_UNREACHED=$((CNT_UNREACHED+1))
+            continue
         fi
         IFS=$'\t' read -r i rc line < "$RESULT_FILE" || {
             error "internal: could not read result for record $expected"
@@ -964,12 +981,17 @@ parallel_process_files() {
         error "$event_failures sidecar(s) were created but their creation event could not be recorded; the Created count in the summary below still includes them"
     fi
 
-    # An interrupted run is expected to come back short by exactly the number
-    # of records it never reached.
     if [ "$((CNT_SCANNED+CNT_UNREACHED))" -ne "$TOTAL_FILES" ]; then
         error "internal: $TOTAL_FILES files were dispatched but $CNT_SCANNED results came back"
         error "rerun with -j 1 and report this output"
         exit 1
+    fi
+    # Results that never arrived, with no signal to explain them, are a fault
+    # in this tool rather than a user interruption. Either way the run did not
+    # check what it was asked to check and must not report success.
+    if [ "$CNT_UNREACHED" -gt 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
+        error "internal: $CNT_UNREACHED of $TOTAL_FILES records never arrived"
+        error "rerun with -j 1 and report this output"
     fi
 }
 
@@ -1126,9 +1148,12 @@ echo "Elapsed:         $(fmt_dur $((SECONDS-RUN_START)))"
 # sidecar was written but its read-back never happened because bookkeeping
 # failed first, so that run has not kept the promise and must not exit 0.
 # Under -c -n nothing was promised, so the warning alone stands.
-# An interrupted scan verified only part of the tree, so it can never report
-# the clean verdict no matter what the counters say.
-if [ "$INTERRUPTED" -eq 1 ]; then
+# A scan that did not reach every file checked less than it was asked to, so
+# it can never report the clean verdict. This is keyed on the count of records
+# that came back, not only on the interrupt flag, because the flag can be lost
+# to a subshell and "checked less than it claims, says nothing" is the one
+# failure this tool must not have.
+if [ "$INTERRUPTED" -eq 1 ] || [ "${CNT_UNREACHED:-0}" -gt 0 ]; then
     return 130
 fi
 if [ "$NO_VERIFY" -eq 0 ] && [ "$CNT_UNVERIFIED_AFTER_EVENT_FAIL" -gt 0 ]; then
