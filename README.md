@@ -33,19 +33,30 @@ Recursion is the default. Pointing it at a volume means the whole volume.
 ```text
 Mode: Verify only | Dir: /Volumes/Media | Depth: unlimited
 
-Verifying /Volumes/Media/a001.mxf ... sidecar found, computing hash.... ✓
-Verifying /Volumes/Media/a002.mxf ... sidecar found, computing hash.... ✓
+Verifying /Volumes/Media/a001.mxf ... sidecar found, computing hash... ✓
+Verifying /Volumes/Media/a002.mxf ... sidecar found, computing hash... ✓
 Verifying /Volumes/Media/notes.txt ... no sidecar!
-Verifying /Volumes/Media/a003.mxf ... sidecar found, computing hash.... hash mismatch! (sidecar: dd0aec17..., computed: 968cc9a4...)
-Verifying /Volumes/Media/a004.mxf ... sidecar found, computing hash.... unreadable!
+Verifying /Volumes/Media/a003.mxf ... sidecar found, computing hash... hash mismatch! (sidecar: dd0aec17..., computed: 968cc9a4...)
+Verifying /Volumes/Media/a004.mxf ... sidecar found, computing hash... unreadable!
 
 Scanned:         5 files
 Verified:        2
 Mismatched:      1   <- corrupt
+  /Volumes/Media/a003.mxf
 Missing/empty:   1
 I/O errors:      1
+  /Volumes/Media/a004.mxf
+Elapsed:         4m12s
 ERROR: Completed with errors
 ```
+
+Files are visited in sorted order, so two runs over the same tree produce the
+same output and can be diffed against each other.
+
+Every nonzero failure counter is followed by the files behind it, capped at
+twenty per category. Knowing that one file out of nine thousand is corrupt is
+useless without knowing which one, and that answer should not require going
+back through the log.
 
 Each outcome is counted separately, because they mean very different things:
 
@@ -102,19 +113,28 @@ Mode combinations:
 | `-c -n` | Create only, skip verification |
 | `-n` alone | Nothing to do, exits with a message |
 
-## Output
+## Progress
 
 On an interactive terminal the parallel engine shows live progress: completed
-verdicts scroll above a status line with the running count, percentage,
-elapsed time, and what is currently being hashed. Piped or redirected output
-carries none of that - every verdict appears exactly once, in walk order,
-with no control characters, so it can go through `grep` or into a log.
+verdicts scroll above a status line carrying the file count, how far along the
+run is, bytes done out of bytes total, elapsed time, throughput, an estimate
+of the time remaining, and what is currently being hashed.
 
-## Parallel output
+```text
+ / 171/1949 42% 1.2T/2.9T 11m03s 340.5M/s eta 2h04m hashing: A008_07091214_C071.braw
+```
 
-The interactive status line exists only on a terminal. It never appears in
-piped or redirected output, which carries exactly what parallel hashing has
-always carried: one verdict per file in walk order.
+The percentage and the estimate are weighted by bytes, not by file count. A
+media tree mixes multi-gigabyte originals with kilobyte metadata files, so
+"171 of 1949 files" can mean anything between one percent and ninety-nine
+percent of the actual work. Sizes come from `du`; if it is unavailable the
+status line falls back to counting files and drops the estimate rather than
+showing one it cannot support.
+
+The status line exists only on a terminal. Piped or redirected output carries
+none of it: every verdict appears exactly once, in walk order, with no control
+characters, so it can go through `grep` or into a log. The final `Elapsed`
+line is printed either way.
 
 ## How it works
 

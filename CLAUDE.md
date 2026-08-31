@@ -4,13 +4,22 @@ A single POSIX-ish bash script at `bin/treecheck`. No build step. Three
 dependency tiers:
 
 - Core (every run): `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`,
-  `mktemp`, `wc`.
+  `mktemp`, `wc`, `sort`. The walk is sorted so two runs over one tree can be
+  diffed; that needs `sort -z`, which is not POSIX, so it is probed once and a
+  sort without it costs the ordering rather than the run.
 - Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
   `-P`, which is common but not POSIX; probed before dispatching instead of
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
   a fallback to 1. An explicit `-j 1` needs nothing from this tier.
 - Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
-  `grep`, `mv`, `sleep`. Never used for piped output.
+  `grep`, `mv`, `sleep`, `du`. Never used for piped output.
+
+Sizes for the progress display come from `du -k`, not `stat`: `du -k` is
+spelled identically on BSD and GNU where `stat` needs `-f%z` on one and
+`-c%s` on the other. It reports allocated blocks rather than apparent size,
+which is the better weight anyway, since allocated blocks are what actually
+gets read. Every part of that path is optional: any failure leaves the
+display counting files, exactly as it did before.
 
 Anything a minimal container strips beyond the tier it exercises is a real
 portability break.
@@ -49,8 +58,15 @@ fixture holding **all** outcome categories at once:
 | unreadable **hidden** dir (`.Trashes`) | pruned, no error |
 | unreadable **non-hidden** dir | walk fails, exit 1 |
 | create-only run over a fresh tree (`-c -n`) | counted as `Not verified`, never as `Verified` |
-| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`), identical exit status |
+| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`), identical **stderr**, identical exit status |
 | path containing a newline or `0x01` under `-j > 1` | refused before any hashing, exit 1, message names `-j 1` |
+| a failing run under `-j > 1` | prints `Completed with errors` on stderr, not just a nonzero exit |
+| a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
+
+Normalize the `Elapsed:` line before diffing the two engines; it is wall
+clock and legitimately differs between runs. Compare stderr as well as
+stdout. Comparing only stdout hid a parallel run that printed its summary and
+then exited 1 with no verdict banner at all, for as long as that bug existed.
 
 Confirm exit status every time, since it is a documented interface:
 
@@ -80,6 +96,22 @@ README option list still agree. They have drifted apart before.
   `if` was restructured.
 - A `find` inside a process substitution loses its exit status, and its stderr
   is easy to discard by accident. Run the walk to a file so failure survives.
+- A bare `exec` carrying a redirection applies that redirection to the
+  **shell**, permanently, not to one command. `exec 3<&- 2>/dev/null`, written
+  to hush a close of a descriptor that might not be open, silently routed
+  every later diagnostic to `/dev/null`: a failing parallel run printed its
+  summary and then exited 1 with no `Completed with errors` and no `error()`
+  output whatsoever. Closing an unopened descriptor succeeds anyway, so the
+  suppression bought nothing. Where a redirection really is wanted around
+  `exec`, wrap it in a group: `{ exec 3<&-; } 2>/dev/null`.
+- `export -f` does not ship the function's source text. Bash re-serializes the
+  body through its own pretty-printer, which renders `$'\n'` and `$'\001'` as
+  quoted literal control characters, and the child re-parses those differently:
+  `out=${out//$'\n'/$'\001'}` replaced one newline with **two** `0x01` bytes in
+  a worker while behaving correctly in the parent. Anything an exported
+  function substitutes must come from the environment, not from an ANSI-C
+  literal at the point of use. The pattern side round-trips; the replacement
+  side does not.
 - `! -path "*/.*"` filters hidden entries out of results but does **not** stop
   `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
   walk starts at `.`, which a bare `.*` matches, pruning the entire tree.

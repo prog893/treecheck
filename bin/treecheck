@@ -3,7 +3,7 @@
 # NVMe integrity checker - creates/verifies SHA-256 sidecar files
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # Config
 HASH_EXT=".sha256"
@@ -13,6 +13,25 @@ NO_VERIFY=0
 STRICT=0
 EXCLUDE_DIRS=()
 JOBS=0   # 0 = auto: one worker per CPU
+
+# Escape byte standing in for a newline inside a one-line worker record.
+# It has to reach the workers through the environment rather than being
+# written as $'\001' at the point of use; see the note in hash_worker.
+ESC_NL=$'\001'
+
+# Set once the walk can be ordered; see the probe next to the worker-count
+# resolution. Zero means this sort cannot read NUL-separated input and the
+# walk is left in whatever order the filesystem returned.
+SORT_NUL=0
+
+# Wall-clock start, stamped before the walk so the summary can report it.
+RUN_START=0
+
+# Byte weights for the live progress display, filled by collect_sizes. Zero
+# means the display counts files instead, which is always a valid fallback.
+BYTES_OK=0
+TOTAL_KB=0
+SIZE_KB=()
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -71,8 +90,9 @@ validate_jobs() {
 
 FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT="" STREAMED=0
 cleanup_tmp() {
-    [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST"
+    [ -n "$FILE_LIST" ] && rm -f "$FILE_LIST" "$FILE_LIST.sorted"
     [ -n "$FIND_ERR" ] && rm -f "$FIND_ERR" "$FIND_ERR.all"
+    [ -n "${ORDERED_PATHS:-}" ] && rm -f "$ORDERED_PATHS"
     [ -n "$RESULTS_DIR" ] && rm -rf "$RESULTS_DIR"
     [ -n "$WORK_INPUT" ] && rm -f "$WORK_INPUT"
     [ -n "${CREATED_LOG:-}" ] && rm -f "$CREATED_LOG"
@@ -87,6 +107,70 @@ cleanup_tmp() {
 }
 trap cleanup_tmp EXIT
 success() { echo -e "${GREEN}✓ $*${NC}"; }
+
+# Sizes travel as kibibytes because that is what du reports, and the whole
+# progress display is integer arithmetic: bash has no floats, so the one
+# fractional digit is produced by scaling the remainder before dividing.
+human_kb() {
+    local kb="$1"
+    if [ "$kb" -lt 1024 ]; then
+        printf '%dK' "$kb"
+    elif [ "$kb" -lt 1048576 ]; then
+        printf '%d.%dM' $((kb/1024)) $((kb%1024*10/1024))
+    elif [ "$kb" -lt 1073741824 ]; then
+        printf '%d.%dG' $((kb/1048576)) $((kb%1048576*10/1048576))
+    else
+        printf '%d.%dT' $((kb/1073741824)) $((kb%1073741824*10/1073741824))
+    fi
+}
+
+# Durations read as a duration rather than a raw second count, which stops
+# being legible somewhere around the four-digit mark on a large volume.
+fmt_dur() {
+    local s="$1"
+    if [ "$s" -lt 60 ]; then
+        printf '%ds' "$s"
+    elif [ "$s" -lt 3600 ]; then
+        printf '%dm%02ds' $((s/60)) $((s%60))
+    else
+        printf '%dh%02dm' $((s/3600)) $((s%3600/60))
+    fi
+}
+
+# Name the files behind a nonzero counter. Both engines collect these in
+# memory rather than in a scratch file: the recap is a convenience, and it
+# should not be the thing that needs a writable filesystem to work. Only the
+# first FAILPATH_CAP paths are kept, so a wholly failed volume cannot bury
+# the summary it belongs to, and the count is bounded no matter how bad the
+# run gets. The totals come from the counters, which are exact regardless.
+FAILPATH_CAP=20
+MISMATCH_PATHS=()
+IOERR_PATHS=()
+
+record_mismatch() {
+    [ ${#MISMATCH_PATHS[@]} -lt $FAILPATH_CAP ] && MISMATCH_PATHS+=("$1")
+    return 0
+}
+
+record_ioerr() {
+    [ ${#IOERR_PATHS[@]} -lt $FAILPATH_CAP ] && IOERR_PATHS+=("$1")
+    return 0
+}
+
+# Called as: print_failure_paths <total> <path>...
+# The empty case has to be spelled ${arr[@]+"${arr[@]}"} at the call site;
+# a bare "${arr[@]}" on an empty array is an unbound variable under set -u
+# in bash 3.2, which is the shell this runs under on macOS.
+print_failure_paths() {
+    local total="$1" p
+    shift
+    [ "$#" -gt 0 ] || return 0
+    for p in "$@"; do
+        echo "  $p"
+    done
+    [ "$total" -gt "$#" ] && echo "  ... and $((total-$#)) more"
+    return 0
+}
 
 # Prints the hash on success. Returns non-zero if the file could not be read,
 # which a pipeline into awk would otherwise hide.
@@ -119,7 +203,7 @@ verify_file_hash() {
         return 2
     }
 
-    echo -n "sidecar found, computing hash.... "
+    echo -n "sidecar found, computing hash... "
     current_hash=$(compute_hash "$file")
     if [ -z "$current_hash" ]; then
         echo "unreadable!"
@@ -154,7 +238,7 @@ create_file_hash() {
         if [ -n "$stored_hash" ]; then
             # Verify existing hash unless NO_VERIFY is set
             if [ $NO_VERIFY -eq 0 ]; then
-                echo -n "sidecar found, computing hash.... "
+                echo -n "sidecar found, computing hash... "
                 current_hash=$(compute_hash "$file")
                 if [ -z "$current_hash" ]; then
                     echo "unreadable!"
@@ -176,7 +260,12 @@ create_file_hash() {
 
     # Create new hash. A file that cannot be read must not get a sidecar,
     # otherwise an empty hash would be recorded as though it were the truth.
-    echo -n "no sidecar, creating.... "
+    #
+    # Everything below completes the single line this function was called on.
+    # Reporting the creation and the read-back on separate lines made create
+    # mode the only path emitting more than one line per file, which the
+    # parallel engine then had to escape and rebuild, and rebuilt wrongly.
+    echo -n "no sidecar, creating... "
     current_hash=$(compute_hash "$file")
     if [ -z "$current_hash" ]; then
         echo "unreadable!"
@@ -209,36 +298,37 @@ create_file_hash() {
         # stderr redirected before the target so a failed redirect cannot
         # leak the shell's own diagnostic past the suppression.
         if ! printf '%s\n' "$file" 2>/dev/null >> "$CREATED_LOG"; then
-            echo "cannot record creation event!"
+            echo "created, but cannot record creation event!"
             return 6
         fi
     fi
-    echo "sidecar created!"
 
-    # Verify newly created hash unless NO_VERIFY is set
+    # Read the sidecar back and compare it against the digest still in hand.
+    #
+    # The digest is NOT recomputed from the source here. Doing that read every
+    # file a second time, doubling the I/O of every create run, and the only
+    # thing the second read can catch beyond this comparison is media that
+    # returns different bytes on consecutive reads. What the read-back is for
+    # is proving the sidecar landed intact, and comparing its contents against
+    # the hash just written proves exactly that.
     if [ $NO_VERIFY -eq 0 ]; then
         local stored_hash
         if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
-            echo "sidecar unreadable!"
-            return 3
-        fi
-        echo -n "Verification: "
-        current_hash=$(compute_hash "$file")
-        if [ -z "$current_hash" ]; then
-            echo "unreadable!"
+            echo "created, but sidecar unreadable!"
             return 3
         fi
         if [ "$stored_hash" = "$current_hash" ]; then
-            echo "✓"
+            echo "created and verified ✓"
             return 0
         else
-            echo "hash mismatch! (sidecar: $stored_hash, computed: $current_hash)"
+            echo "created, but read-back mismatch! (sidecar: $stored_hash, computed: $current_hash)"
             return 1
         fi
     fi
 
     # Sidecar was written but deliberately not read back, so it has not been
     # verified and must not be counted as though it had been.
+    echo "created (not read back)"
     return 4
 }
 
@@ -268,10 +358,19 @@ hash_worker() {
     else
         out=$(verify_file_hash "$f" 2>&1); rc=$?
     fi
-    # One record must be one physical line: create mode legitimately prints
-    # two (the creation report, then the read-back verdict), so newlines
-    # travel escaped and are restored just before display.
-    out=${out//$'\n'/$'\001'}
+    # One record must be one physical line, so any newline travels escaped
+    # and is restored just before display. Every verdict is single-line now,
+    # which leaves this as a backstop against anything unexpected reaching
+    # the merged stderr rather than a path the normal run takes.
+    #
+    # The replacement MUST come from the environment. Written literally as
+    # $'\001' it does not survive the trip: export -f re-serializes the body
+    # through bash's own pretty-printer, which renders the ANSI-C escape as a
+    # quoted control character, and the child re-parses that into TWO
+    # replacements per match. That is what turned create mode's second line
+    # into a blank line followed by the verdict, under -j > 1 only. The
+    # pattern side round-trips correctly and is left as it was.
+    out=${out//$'\n'/"$ESC_NL"}
     # Each result lands in its own index-named file. Appending to one shared
     # file is only collision-free while every write stays under the stdio
     # buffer size, and a deep path plus a mismatch diagnostic can exceed
@@ -318,6 +417,71 @@ consume_new() {
     fi
 }
 
+# Weigh every dispatched file so the progress display can talk about bytes
+# instead of file counts. Sets BYTES_OK=1 and fills TOTAL_KB and SIZE_KB[] on
+# success; on any failure it leaves BYTES_OK=0 and the display falls back to
+# counting files, which is what it did before. This is a display aid, so
+# nothing in here may fail the run.
+#
+# Sizes come from du rather than stat because du -k spells the same thing the
+# same way on BSD and GNU, where stat needs -f%z on one and -c%s on the other.
+# What du reports is allocated blocks rather than apparent size, which is if
+# anything the better weight here: allocated blocks are what actually gets
+# read off the disk.
+collect_sizes() {
+    local usable="$1" total="$2" kb i=0
+    BYTES_OK=0
+    TOTAL_KB=0
+    SIZE_KB=()
+    [ "$usable" -eq 1 ] || return 0
+    [ "$total" -gt 0 ] || return 0
+    command -v du >/dev/null 2>&1 || return 0
+    command -v awk >/dev/null 2>&1 || return 0
+    command -v tr >/dev/null 2>&1 || return 0
+
+    # Read through a process substitution rather than a scratch file, and
+    # rather than a pipe: `cmd | while read` puts the loop in a subshell, so
+    # the array it fills would not survive back to the caller.
+    #
+    # du exits nonzero if any single argument could not be stat'd, and xargs
+    # turns that into 123, so neither status can gate this. The join below
+    # tolerates missing entries, which is the same thing measured properly.
+    #
+    # Positional matching would be wrong: du drops arguments it cannot stat
+    # and reports a hardlinked inode once per invocation, so its output is
+    # not one line per input. Join on the path instead, and split on the
+    # FIRST tab only, since a path may legitimately contain one. awk reads
+    # du's output from stdin ("-") and then the ordered list, so the second
+    # pass emits exactly one weight per dispatched file, in dispatch order.
+    while IFS= read -r kb; do
+        case "$kb" in
+            ''|*[!0-9]*) kb=0 ;;
+        esac
+        SIZE_KB[$i]=$kb
+        TOTAL_KB=$((TOTAL_KB+kb))
+        i=$((i+1))
+    done < <(tr '\n' '\0' < "$ORDERED_PATHS" 2>/dev/null \
+             | xargs -0 du -k 2>/dev/null \
+             | awk '
+                 NR==FNR {
+                     t = index($0, "\t")
+                     if (t > 0) size[substr($0, t+1)] = substr($0, 1, t-1)
+                     next
+                 }
+                 { k = size[$0]; print (k == "" ? "0" : k) }
+               ' - "$ORDERED_PATHS" 2>/dev/null)
+
+    # One weight per dispatched file or none at all: a short list would put
+    # every index past the gap against the wrong size.
+    if [ "$i" -eq "$total" ] && [ "$TOTAL_KB" -gt 0 ]; then
+        BYTES_OK=1
+    else
+        TOTAL_KB=0
+        SIZE_KB=()
+    fi
+    return 0
+}
+
 progress_monitor() {
     local total="$1" xpid="$2"
     # Both event logs are consumed through byte offsets, so each tick pays
@@ -326,7 +490,7 @@ progress_monitor() {
     # appended as they arrive, completed ones are filtered out, and its
     # size never exceeds the number of workers actually mid-file.
     local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
-    local inflight rate_x10 pct a1 a2 a3
+    local inflight rate_x10 pct a1 a2 a3 done_kb=0 elapsed rate_kb eta
     while kill -0 "$xpid" 2>/dev/null; do
         if ! consume_new "$INFLIGHT" "$ioff"; then
             printf '\r\033[Kprogress events unreadable; retrying\n'
@@ -351,6 +515,12 @@ progress_monitor() {
             while IFS= read -r idx; do
                 [ -n "$idx" ] || continue
                 done=$((done+1))
+                # Bytes, not files, drive the percentage. A media tree mixes
+                # multi-gigabyte originals with kilobyte metadata sidecars,
+                # so a file count says almost nothing about how much hashing
+                # is left. An index with no recorded size contributes zero,
+                # which loses a little accuracy and never stalls the display.
+                done_kb=$((done_kb + ${SIZE_KB[$idx]:-0}))
                 # The completed index leaves the active set; grep status 1
                 # means nothing was left, which is fine. Anything else, or a
                 # failed replacement, degrades the display and says so.
@@ -369,7 +539,7 @@ progress_monitor() {
                 fi
                 if [ -s "$RESULTS_DIR/$idx" ]; then
                     IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
-                    line=${line//$'\001'/$'\n'}
+                    line=${line//"$ESC_NL"/$'\n'}
                     printf '\r\033[K%s\n' "$line"
                 fi
             done < "$MONBUF"
@@ -383,17 +553,37 @@ progress_monitor() {
         [ -n "$a1" ] && inflight="$a1"
         [ -n "$a2" ] && inflight="${inflight:+$inflight, }$a2"
         [ -n "$a3" ] && inflight="${inflight:+$inflight, }$a3"
-        # Tenths first: integer division would truncate 0.5 to 0.0.
-        rate_x10=0
-        if [ $((SECONDS-start)) -gt 0 ]; then
-            rate_x10=$((done*10/(SECONDS-start)))
+        elapsed=$((SECONDS-start))
+        if [ "$BYTES_OK" -eq 1 ]; then
+            # Throughput over the whole run so far, not an instantaneous
+            # sample: a per-tick rate on a mix of huge and tiny files swings
+            # hard enough to make the remaining estimate useless.
+            rate_kb=0
+            [ "$elapsed" -gt 0 ] && rate_kb=$((done_kb/elapsed))
+            pct=$((done_kb*100/TOTAL_KB))
+            if [ "$rate_kb" -gt 0 ]; then
+                eta=$(fmt_dur $(((TOTAL_KB-done_kb)/rate_kb)))
+            else
+                eta="--"
+            fi
+            printf '\r\033[K %s %d/%d %d%% %s/%s %s %s/s eta %s hashing: %s' \
+                "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
+                "$(human_kb "$done_kb")" "$(human_kb "$TOTAL_KB")" \
+                "$(fmt_dur "$elapsed")" "$(human_kb "$rate_kb")" "$eta" \
+                "${inflight:-...}"
+        else
+            # No usable sizes, so the percentage falls back to the file count
+            # and there is nothing honest to base an estimate on.
+            # Tenths first: integer division would truncate 0.5 to 0.0.
+            rate_x10=0
+            [ "$elapsed" -gt 0 ] && rate_x10=$((done*10/elapsed))
+            pct=0
+            if [ "$total" -gt 0 ]; then pct=$((done*100/total)); fi
+            printf '\r\033[K %s %d/%d %d%% %s %d.%d files/s hashing: %s' \
+                "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
+                "$(fmt_dur "$elapsed")" "$((rate_x10/10))" "$((rate_x10%10))" \
+                "${inflight:-...}"
         fi
-        pct=0
-        if [ "$total" -gt 0 ]; then pct=$((done*100/total)); fi
-        printf '\r\033[K %s %d/%d %d%% %ds %d.%d/s hashing: %s' \
-            "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
-            "$((SECONDS-start))" "$((rate_x10/10))" "$((rate_x10%10))" \
-            "${inflight:-...}"
         spin=$((spin+1))
         sleep 0.5
     done
@@ -410,7 +600,7 @@ progress_monitor() {
             fi
             if [ -s "$RESULTS_DIR/$idx" ]; then
                 IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
-                line=${line//$'\001'/$'\n'}
+                line=${line//"$ESC_NL"/$'\n'}
                 printf '\r\033[K%s\n' "$line"
             fi
         done < "$MONBUF"
@@ -450,9 +640,10 @@ parallel_process_files() {
         ACTIVE=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         NEEDS_PRINT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         ALL_IDX=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+        ORDERED_PATHS=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         STREAMED=1
     fi
-    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG
+    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG ESC_NL
     export -f hash_worker verify_file_hash create_file_hash compute_hash
 
     echo "Hashing with $JOBS parallel workers..."
@@ -461,7 +652,7 @@ parallel_process_files() {
     # enumeration runs against a file, not a pipeline: inside `while | xargs`
     # the loop is a subshell and its counter never comes back, which would
     # silently report zero dispatched files.
-    local idx=0
+    local idx=0 sizes_ok=$STREAMED
     while IFS= read -r -d '' f; do
         f="$TARGET_DIR/${f#./}"
         case $f in
@@ -477,10 +668,19 @@ parallel_process_files() {
                 error "rerun with -j 1"
                 exit 1 ;;
         esac
+        # A second, newline-separated copy of the same paths in the same
+        # order, for the sizing pass below. Safe as newline-separated text
+        # precisely because the guard above has already refused any path
+        # that contains a newline.
+        if [ "$sizes_ok" -eq 1 ]; then
+            printf '%s\n' "$f" >> "$ORDERED_PATHS" || sizes_ok=0
+        fi
         printf '%s\0%s\0' "$idx" "$f"
         idx=$((idx+1))
     done < "$FILE_LIST" > "$WORK_INPUT"
     TOTAL_FILES=$idx
+
+    collect_sizes "$sizes_ok" "$TOTAL_FILES"
 
     # xargs is guarded against empty input because GNU and BSD disagree on
     # whether an empty list still runs the command once.
@@ -526,7 +726,18 @@ parallel_process_files() {
             IFS= read -r -u 3 NP_NEXT || NP_NEXT=""
         fi
     fi
+    # The failure recap needs the path, and the record cannot carry it as its
+    # own field: a tab inside a path would shift the fields after it. The walk
+    # list is already in dispatch order and record N is its Nth entry, so it
+    # is read in lockstep here instead, which stays exact for any path bytes.
+    local failpath=""
+    exec 4< "$FILE_LIST"
     for (( expected=0; expected<TOTAL_FILES; expected++ )); do
+        if IFS= read -r -d '' failpath <&4; then
+            failpath="$TARGET_DIR/${failpath#./}"
+        else
+            failpath=""
+        fi
         # A path containing a newline would split its record and shift every
         # index after it; a tab would shift one record's fields past
         # validation. Newline and escape-byte paths are refused before
@@ -555,7 +766,7 @@ parallel_process_files() {
             0|1|2|3|4|5|6) : ;;
             *) error "internal: record $i carries an unknown status"; error "rerun with -j 1 and report this output"; exit 1 ;;
         esac
-        line=${line//$'\001'/$'\n'}
+        line=${line//"$ESC_NL"/$'\n'}
         # On an interactive terminal the monitor streamed most verdicts as
         # they completed; the ones whose progress event was lost appear here,
         # in walk order, exactly once each. A pipe gets every verdict.
@@ -567,13 +778,16 @@ parallel_process_files() {
         fi
         case $rc in
             0) CNT_OK=$((CNT_OK+1)) ;;
-            1) CNT_MISMATCH=$((CNT_MISMATCH+1)) ;;
+            1) CNT_MISMATCH=$((CNT_MISMATCH+1))
+               record_mismatch "$failpath" ;;
             2) CNT_MISSING=$((CNT_MISSING+1)) ;;
-            3) CNT_IOERR=$((CNT_IOERR+1)) ;;
+            3) CNT_IOERR=$((CNT_IOERR+1))
+               record_ioerr "$failpath" ;;
             4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
             # A sidecar whose write failed is an I/O error like an unreadable
             # source; the distinct code exists only so creation is not counted.
-            5) CNT_IOERR=$((CNT_IOERR+1)) ;;
+            5) CNT_IOERR=$((CNT_IOERR+1))
+               record_ioerr "$failpath" ;;
             # Written but its creation event could not be recorded: still a
             # creation, and no read-back happened, so it counts as neither
             # verified nor I/O-lost.
@@ -584,7 +798,14 @@ parallel_process_files() {
         esac
         CNT_SCANNED=$((CNT_SCANNED+1))
     done
-    exec 3<&- 2>/dev/null
+    # No "2>/dev/null" on these. A bare exec carrying a redirection applies
+    # it to the SHELL, permanently: the suppression silenced every diagnostic
+    # for the rest of the run, so a parallel run that failed printed its
+    # summary and then exited 1 with no "Completed with errors" at all, and
+    # every error() below this point went nowhere. Closing a descriptor that
+    # was never opened succeeds anyway, so nothing needed suppressing.
+    exec 3<&-
+    exec 4<&-
 
     # Creation events arrived through the log, not through records. Status-6
     # creations never made it into the log, so their count is added back.
@@ -674,6 +895,24 @@ if [ $find_status -ne 0 ]; then
     sed 's/^/  /' < "$FIND_ERR" >&2
 fi
 
+# Order the walk. find returns directory order, which differs between two
+# runs over the same tree and makes output impossible to diff. Sorting is a
+# separate step rather than a pipe on purpose: a pipeline would discard the
+# find status checked just above, which is what tells a failed traversal
+# apart from an empty directory.
+#
+# LC_ALL=C so the order is the same everywhere rather than depending on the
+# caller's collation. Both engines read this file, so they stay in step.
+if [ "$SORT_NUL" -eq 1 ]; then
+    if LC_ALL=C sort -z "$FILE_LIST" > "$FILE_LIST.sorted" 2>/dev/null &&
+       mv "$FILE_LIST.sorted" "$FILE_LIST"; then
+        :
+    else
+        rm -f "$FILE_LIST.sorted"
+        error "could not sort the walk; continuing in filesystem order"
+    fi
+fi
+
 # Process files: parallel engine when more than one worker was asked for,
 # otherwise the original sequential loop, byte for byte.
 if [ "$JOBS" -gt 1 ]; then
@@ -701,11 +940,11 @@ while IFS= read -r -d '' file; do
   # 4 recorded but not read back
   case $? in
     0) CNT_OK=$((CNT_OK+1)) ;;
-    1) CNT_MISMATCH=$((CNT_MISMATCH+1)) ;;
+    1) CNT_MISMATCH=$((CNT_MISMATCH+1)); record_mismatch "$file" ;;
     2) CNT_MISSING=$((CNT_MISSING+1)) ;;
-    3) CNT_IOERR=$((CNT_IOERR+1)) ;;
+    3) CNT_IOERR=$((CNT_IOERR+1)); record_ioerr "$file" ;;
     4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
-    5) CNT_IOERR=$((CNT_IOERR+1)) ;;
+    5) CNT_IOERR=$((CNT_IOERR+1)); record_ioerr "$file" ;;
   esac
 done < "$FILE_LIST"
 fi
@@ -720,13 +959,23 @@ fi
 # made a corrupt file indistinguishable from a file that simply never had a
 # sidecar, which are opposite situations demanding opposite responses.
 echo
-echo "Scanned:         $CNT_SCANNED files"
+if [ "$CNT_SCANNED" -eq 1 ]; then
+    echo "Scanned:         1 file"
+else
+    echo "Scanned:         $CNT_SCANNED files"
+fi
 echo "Verified:        $CNT_OK"
 if [ "$mode" = "create" ]; then echo "Created:         $CNT_CREATED"; fi
 if [ $CNT_UNVERIFIED -gt 0 ]; then echo "Not verified:    $CNT_UNVERIFIED"; fi
+# Each nonzero failure counter is followed by the files behind it. A count
+# on its own sends the reader back through the whole log to find out which
+# file rotted, which is the one question this tool exists to answer.
 echo -e "Mismatched:      ${CNT_MISMATCH}$([ $CNT_MISMATCH -gt 0 ] && echo "   ${RED}<- corrupt${NC}")"
+print_failure_paths "$CNT_MISMATCH" ${MISMATCH_PATHS[@]+"${MISMATCH_PATHS[@]}"}
 echo "Missing/empty:   $CNT_MISSING"
 echo "I/O errors:      $CNT_IOERR"
+print_failure_paths "$CNT_IOERR" ${IOERR_PATHS[@]+"${IOERR_PATHS[@]}"}
+echo "Elapsed:         $(fmt_dur $((SECONDS-RUN_START)))"
 
 # A normal create run promises to read back what it wrote. Status 6 means a
 # sidecar was written but its read-back never happened because bookkeeping
@@ -798,6 +1047,22 @@ done
 [ -z "$TARGET_DIR" ] && { error "No directory specified"; usage; }
 [ ! -d "$TARGET_DIR" ] && { error "Directory not found: $TARGET_DIR"; exit 1; }
 
+# Every reported path is built as "$TARGET_DIR/${relative#./}", so a trailing
+# slash on the argument put a doubled separator in every line of every run
+# started as "treecheck ./". Stripping stops at one character so that a scan
+# of "/" does not normalize the target away to the empty string.
+while [ ${#TARGET_DIR} -gt 1 ] && [ "${TARGET_DIR%/}" != "$TARGET_DIR" ]; do
+    TARGET_DIR="${TARGET_DIR%/}"
+done
+
+# Ordering the walk needs a sort that reads NUL-separated records. That is
+# not POSIX, so it is probed once here rather than assumed, in the same
+# spirit as the xargs -P probe: a missing feature costs the ordering, never
+# the run.
+if printf 'b\0a\0' | LC_ALL=C sort -z >/dev/null 2>&1; then
+    SORT_NUL=1
+fi
+
 # Resolve automatic worker count: one per CPU, on either platform.
 if [ "$JOBS" -eq 0 ]; then
     JOBS=$( { sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1; } )
@@ -832,6 +1097,7 @@ fi
     echo
 
     run_status=0
+    RUN_START=$SECONDS
     FILE_LIST=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     FIND_ERR=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     process_files "$MODE" || run_status=$?
