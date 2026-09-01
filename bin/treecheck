@@ -509,7 +509,10 @@ hash_worker() {
     if [ -n "${INFLIGHT:-}" ]; then
         # Display-only bookkeeping: losing an entry makes the status line
         # less informative, never the verification less correct.
-        if ! printf '%s\t%s\n' "$i" "$f" 2>/dev/null >> "$INFLIGHT"; then
+        # The sanitized form, not the raw path: the monitor builds the
+        # "hashing:" list straight from this file and prints it to the
+        # terminal, so a raw name here would walk around the escaping.
+        if ! printf '%s\t%s\n' "$i" "$DISPLAY_PATH" 2>/dev/null >> "$INFLIGHT"; then
             echo "treecheck: progress tracking is degraded for this file" >&2
         fi
     fi
@@ -805,6 +808,53 @@ progress_monitor() {
     printf '\r\033[K'
 }
 
+# Start the worker engine and set XPID. Split from the wait below, with the
+# live display slotted between them, because the two branches that once
+# inlined this sequence had to receive the very same interrupt fix twice; the
+# second copy is exactly where a reopened race would go unnoticed.
+launch_workers() {
+    # Job control for the launch alone, so the worker tree lands in a process
+    # group of its own and can be signalled as a unit. For a single background
+    # command "$!" is that group's leader; it would NOT be for a pipeline,
+    # where the leader is the first process.
+    set -m
+    xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
+        < "$WORK_INPUT" >/dev/null &
+    XPID=$!
+    set +m
+    # A signal landing between the launch above and the assignment of XPID
+    # would have found XPID empty, so the handler had no group to signal and
+    # the wait below would then have sat through a full run's worth of
+    # hashing. Re-running the handler here closes that window: it only
+    # signals, so running it twice costs nothing, and by this point XPID is set.
+    [ "$INTERRUPTED" -eq 1 ] && on_interrupt
+    return 0
+}
+
+# Wait for the worker engine and read the outcome from its exit status.
+#
+# The wait lives here rather than in the signal handler so the status is
+# actually observed. Above 128 means it died from a signal, and that is what
+# the interruption is read from rather than the handler's flag: a trap firing
+# while the shell sits inside a command substitution runs in THAT SUBSHELL, so
+# its assignment to INTERRUPTED is discarded and the parent never sees it. The
+# progress loop is full of command substitutions, so that window is wide.
+#
+# Waiting here is also what keeps cleanup from running while a worker is still
+# writing its result. Braced so job control's "Terminated" notice cannot reach
+# stderr and diverge the two engines' output; the status still escapes.
+await_workers() {
+    local xrc=0
+    { wait "$XPID" || xrc=$?; } 2>/dev/null
+    XPID=""
+    [ "$xrc" -gt 128 ] && INTERRUPTED=1
+    if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
+        error "parallel hashing failed"
+        exit 1
+    fi
+    return 0
+}
+
 # Hash FILE_LIST across $JOBS workers. Each result lands in its own
 # index-named file under RESULTS_DIR; replay walks the indices in order, so
 # the output is identical to what the sequential engine prints, whatever
@@ -894,65 +944,9 @@ parallel_process_files() {
     # not to do. Nothing is dispatched, so replay counts every record as not
     # reached.
     if [ "$TOTAL_FILES" -gt 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
-        if [ "$STREAMED" -eq 1 ]; then
-            # Job control for the launch alone, so the worker tree lands in a
-            # process group of its own and can be signalled as a unit. For a
-            # single background command "$!" is that group's leader; it would
-            # NOT be for a pipeline, where the leader is the first process.
-            set -m
-            xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
-                < "$WORK_INPUT" >/dev/null &
-            XPID=$!
-            set +m
-            # A signal landing between the launch above and the assignment
-            # of XPID would have found XPID empty, so the handler had no group
-            # to signal and the flow below would then have waited for a full
-            # run's worth of hashing. Re-running the handler here closes that
-            # window: it is idempotent, and by this point XPID is set.
-            [ "$INTERRUPTED" -eq 1 ] && on_interrupt
-            progress_monitor "$TOTAL_FILES" "$XPID"
-            # Wait here rather than in the signal handler, so the engine's
-            # exit status is actually observed. A status above 128 means it
-            # died from a signal, which is read as the interruption instead of
-            # trusting the handler's flag: a trap that fires while the shell
-            # sits inside a command substitution runs in THAT SUBSHELL, so its
-            # assignment to INTERRUPTED is discarded and the parent never sees
-            # it. This loop is full of command substitutions, so that window is
-            # wide. Deriving it from the status cannot be missed.
-            #
-            # Waiting also has to happen before anything is cleaned up, or the
-            # workers write their results into a directory that is already gone.
-            # Braced so job control's "Terminated" notice cannot reach stderr
-            # and diverge the two engines' output; the status still escapes.
-            xrc=0
-            { wait "$XPID" || xrc=$?; } 2>/dev/null
-            XPID=""
-            [ "$xrc" -gt 128 ] && INTERRUPTED=1
-            if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
-                error "parallel hashing failed"
-                exit 1
-            fi
-        else
-            set -m
-            xargs -0 -n2 -P "$JOBS" bash -c 'hash_worker "$@"' _ \
-                < "$WORK_INPUT" >/dev/null &
-            XPID=$!
-            set +m
-            # A signal landing between the launch above and the assignment
-            # of XPID would have found XPID empty, so the handler had no group
-            # to signal and the flow below would then have waited for a full
-            # run's worth of hashing. Re-running the handler here closes that
-            # window: it is idempotent, and by this point XPID is set.
-            [ "$INTERRUPTED" -eq 1 ] && on_interrupt
-            xrc=0
-            { wait "$XPID" || xrc=$?; } 2>/dev/null
-            XPID=""
-            [ "$xrc" -gt 128 ] && INTERRUPTED=1
-            if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
-                error "parallel hashing failed"
-                exit 1
-            fi
-        fi
+        launch_workers
+        [ "$STREAMED" -eq 1 ] && progress_monitor "$TOTAL_FILES" "$XPID"
+        await_workers
     fi
 
     # Replay walks the indices in order, so ordering needs no sort and a
