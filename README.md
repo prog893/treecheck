@@ -151,30 +151,36 @@ of the time remaining, and what is currently being hashed.
 The percentage and the estimate are weighted by bytes, not by file count. A
 media tree mixes multi-gigabyte originals with kilobyte metadata files, so
 "171 of 1949 files" can mean anything between one percent and ninety-nine
-percent of the actual work. Sizes come from `du`; if it is unavailable the
-status line falls back to counting files and drops the estimate rather than
-showing one it cannot support. Sizes and rates use binary units, because `du`
+percent of the actual work. Sizes come from `du`. If it is unavailable, or if
+it cannot return a size for some path the walk turned up, the status line falls
+back to counting files and drops the estimate rather than showing one it cannot
+support. A path `du` skips because it is a second link to an inode already
+counted is asked about individually first, so an ordinary hardlink does not
+cost the whole run its byte weighting. Sizes and rates use binary units, because `du`
 reports kibibytes: a `GiB` here is 1024 MiB, not 1000 MB.
 
 The status line is truncated to a single terminal row, using the width
 reported by `tput cols`, or 80 columns if that fails. That fallback is best
 effort rather than a guarantee: a terminal narrower than 80 columns can still
-wrap it. It is erased by
-returning to column zero and clearing to end of line, and the row a terminal
-returns to is the last one, so a status line allowed to wrap would leave its
-first row stranded in the scrollback for the rest of the run.
+wrap it. It is erased by returning to column zero and clearing to end of line,
+and the row a terminal returns to is the last one, so a status line allowed to
+wrap would leave its first row stranded in the scrollback for the rest of the
+run.
 
 The status line exists only on a terminal. Piped or redirected output carries
 none of it: every verdict appears exactly once, in walk order, so it can go
 through `grep` or into a log. The final `Elapsed` line is printed either way.
 
-Parallel output additionally guarantees one line per verdict, because a path
-holding a newline or a `0x01` byte is refused before any hashing starts and the
-run tells you to use `-j 1`. Those two bytes are the only ones refused: any
-other control byte a filename happens to contain, a tab or an escape among
-them, is printed as it is by either engine. Serial output does not make even
-the one-line promise, since `-j 1` supports newline paths and prints them
-unaltered, so one verdict can span several lines when a filename does.
+Every verdict is one line, in both engines, because control bytes in a
+filename are replaced with `?` before it is printed. That is what the display
+guarantees.
+
+Separately, and for a different reason, the parallel engine refuses to hash a
+path whose real name holds a newline or a `0x01` byte, and tells you to rerun
+with `-j 1`. That rule is about the format workers use to report results, not
+about the display: a newline would split a record and `0x01` is the escape
+byte a record travels with. `-j 1` needs no such format and takes those paths
+happily, printing them sanitized like any other.
 
 ## How it works
 
