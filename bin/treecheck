@@ -844,10 +844,27 @@ launch_workers() {
 # writing its result. Braced so job control's "Terminated" notice cannot reach
 # stderr and diverge the two engines' output; the status still escapes.
 await_workers() {
-    local xrc=0
+    local xrc=0 drain=0
     { wait "$XPID" || xrc=$?; } 2>/dev/null
+    if [ "$xrc" -gt 128 ]; then
+        INTERRUPTED=1
+        # A wait interrupted by a caught signal returns as soon as the handler
+        # has run, WITHOUT the child having exited or been reaped. Demonstrable
+        # in isolation: the wait returns 143 while the child is still alive,
+        # and a second wait collects it. Returning here would let cleanup take
+        # the results directory out from under workers that are still writing,
+        # which is the whole reason the wait is in this flow rather than in the
+        # handler. So keep waiting until the engine is really gone.
+        while kill -0 "$XPID" 2>/dev/null; do
+            { wait "$XPID"; } 2>/dev/null || true
+            kill -0 "$XPID" 2>/dev/null || break
+            drain=$((drain+1))
+            # Escalate rather than hang if the group is refusing to go.
+            [ "$drain" -eq 20 ] && { kill -KILL -"$XPID" 2>/dev/null || true; }
+            [ "$drain" -ge 40 ] && break
+        done
+    fi
     XPID=""
-    [ "$xrc" -gt 128 ] && INTERRUPTED=1
     if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
         error "parallel hashing failed"
         exit 1
