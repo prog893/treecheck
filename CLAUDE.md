@@ -101,7 +101,7 @@ matters because `xargs` neither forwards a signal to children it has already
 started nor waits for them once killed. Send a **process-group** signal
 (`set -m`, then `kill -INT -$PID`) for the Ctrl-C shape and a **direct**
 `kill -TERM $PID` for the other, and check for surviving `shasum` processes
-afterward, not just the exit status. `kill -TERM $PID` to a
+afterward, not just the exit status.
 A plain `kill -INT` to a background job from a non-interactive shell is
 ignored outright, so that spelling passes while real Ctrl-C is broken.
 Interrupt at several different moments, not one, and confirm that a run which
@@ -174,6 +174,9 @@ README option list still agree. They have drifted apart before.
   workers were gone left them writing results into a deleted directory, which
   the shell reports as "No such file or directory" after the prompt has already
   returned.
+- Print a filename with `printf '%s'`, never `echo`. Under `xpg_echo` bash's
+  `echo` expands backslash escapes in its argument, so a name holding a literal
+  backslash-n reaches the terminal as a line break and splits a verdict in two.
 - A filename is untrusted input. Printing one straight to a terminal lets it
   carry `ESC` and rewrite the report about itself, and a name that erases its
   own `Mismatched` line is precisely the silent failure this tool exists to

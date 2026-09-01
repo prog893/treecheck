@@ -278,6 +278,9 @@ fmt_dur() {
 # in a global instead of being returned through $( ), because a command
 # substitution forks once per file; the common case here is a pattern match
 # and an assignment, with no subprocess at all.
+# Print the result with printf, never echo: with xpg_echo set, bash's echo
+# expands backslash escapes in its argument, so a filename containing a literal
+# backslash-n would come out as a line break and put a verdict on two lines.
 DISPLAY_PATH=""
 set_display_path() {
     case $1 in
@@ -325,7 +328,7 @@ print_failure_paths() {
     [ "$#" -gt 0 ] || return 0
     for p in "$@"; do
         set_display_path "$p"
-        echo "  $DISPLAY_PATH"
+        printf '  %s\n' "$DISPLAY_PATH"
     done
     [ "$total" -gt "$#" ] && echo "  ... and $((total-$#)) more"
     return 0
@@ -1044,7 +1047,7 @@ parallel_process_files() {
         # they completed; the ones whose progress event was lost appear here,
         # in walk order, exactly once each. A pipe gets every verdict.
         if [ "$STREAMED" -eq 0 ]; then
-            echo "$line"
+            printf '%s\n' "$line"
         elif [ -n "$NP_NEXT" ] && [ "$expected" = "$NP_NEXT" ]; then
             # Erase the status line first. A bare echo here would print the
             # verdict underneath it and leave the bar stranded in scrollback.
@@ -1216,12 +1219,12 @@ while IFS= read -r -d '' file; do
 
     # Skip directories (extra safety)
     if [ -d "$file" ]; then
-      [ $VERBOSE -eq 1 ] && { set_display_path "$file"; echo "Skipping directory: $DISPLAY_PATH"; }
+      [ $VERBOSE -eq 1 ] && { set_display_path "$file"; printf 'Skipping directory: %s\n' "$DISPLAY_PATH"; }
       continue
   fi
 
   set_display_path "$file"
-  echo -n "Verifying $DISPLAY_PATH ... "
+  printf 'Verifying %s ... ' "$DISPLAY_PATH"
 
   if [ "$mode" = "create" ]; then
     create_file_hash "$file"
