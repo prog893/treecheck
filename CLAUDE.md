@@ -161,6 +161,14 @@ README option list still agree. They have drifted apart before.
   trap sets: derive it from a fact the parent observes directly, here the
   engine's wait status (above 128 means it died from a signal) plus the count of
   results that actually came back.
+- `wait` interrupted by a caught signal returns **as soon as the handler has
+  run**, with a status above 128, and the child is neither exited nor reaped at
+  that point. Verify in isolation if in doubt: a trapped `TERM` makes `wait`
+  return 143 while the child is demonstrably still alive, and a second `wait`
+  collects it. Anything that must not outlive the child, cleanup above all, has
+  to keep waiting until the process is actually gone rather than trusting the
+  first return. Tests that `sleep` before checking for survivors will not catch
+  this, because the sleep is long enough for the children to die by themselves.
 - `wait` belongs in the main flow, not in the signal handler. Waiting in the
   handler consumed the status the main flow needed, and cleaning up before the
   workers were gone left them writing results into a deleted directory, which
