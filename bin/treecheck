@@ -266,6 +266,28 @@ fmt_dur() {
     fi
 }
 
+# A filename is untrusted input: it can hold ESC and friends, and a verdict
+# line carrying those straight to a terminal lets the name rewrite the report
+# about itself. Hiding its own "Mismatched" line is exactly the outcome this
+# tool exists to prevent, so nothing reaches output without passing through
+# here first.
+#
+# Control bytes are replaced rather than the whole path being quoted: %q would
+# wrap every ordinary path containing a space, which on a media tree is most of
+# them, and make the output far harder to read for no gain. The result is set
+# in a global instead of being returned through $( ), because a command
+# substitution forks once per file; the common case here is a pattern match
+# and an assignment, with no subprocess at all.
+DISPLAY_PATH=""
+set_display_path() {
+    case $1 in
+        *[[:cntrl:]]*)
+            DISPLAY_PATH=$(printf '%s' "$1" | tr '[:cntrl:]' '?') ;;
+        *)
+            DISPLAY_PATH=$1 ;;
+    esac
+}
+
 # Name the files behind a nonzero counter. Both engines collect these in
 # memory rather than in a scratch file: the recap is a convenience, and it
 # should not be the thing that needs a writable filesystem to work. Only the
@@ -302,7 +324,8 @@ print_failure_paths() {
     shift
     [ "$#" -gt 0 ] || return 0
     for p in "$@"; do
-        echo "  $p"
+        set_display_path "$p"
+        echo "  $DISPLAY_PATH"
     done
     [ "$total" -gt "$#" ] && echo "  ... and $((total-$#)) more"
     return 0
@@ -479,6 +502,7 @@ create_file_hash() {
 # empty-sidecar rewrite wrong.
 hash_worker() {
     local i="$1" f="$2" out rc
+    set_display_path "$f"
     # Progress events travel only when an interactive display is wired up.
     # Both writes are a handful of bytes, small enough that concurrent
     # appends cannot interleave.
@@ -515,7 +539,7 @@ hash_worker() {
     # the results directory down while a worker is still finishing, and the
     # shell would otherwise print its own "No such file or directory" for each
     # one, after the summary and even after the prompt has come back.
-    printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$f" "$out" \
+    printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$DISPLAY_PATH" "$out" \
         2>/dev/null > "$RESULTS_DIR/$i"
     if [ -n "${DONE_LOG:-}" ]; then
         # A lost event means the live view skips this verdict; the ordered
@@ -817,7 +841,7 @@ parallel_process_files() {
         STREAMED=1
     fi
     export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG ESC_NL
-    export -f hash_worker verify_file_hash create_file_hash compute_hash
+    export -f hash_worker verify_file_hash create_file_hash compute_hash set_display_path
 
     echo "Hashing with $JOBS parallel workers..."
 
@@ -833,11 +857,13 @@ parallel_process_files() {
             # for multi-line verdicts, so neither may travel inside a path.
             # Both are refused before any hashing starts; -j 1 handles them.
             *$'\n'*)
-                error "cannot hash in parallel: path contains a newline: $f"
+                set_display_path "$f"
+                error "cannot hash in parallel: path contains a newline: $DISPLAY_PATH"
                 error "rerun with -j 1"
                 exit 1 ;;
             *$'\001'*)
-                error "cannot hash in parallel: path contains a 0x01 byte: $f"
+                set_display_path "$f"
+                error "cannot hash in parallel: path contains a 0x01 byte: $DISPLAY_PATH"
                 error "rerun with -j 1"
                 exit 1 ;;
         esac
@@ -1179,11 +1205,12 @@ while IFS= read -r -d '' file; do
 
     # Skip directories (extra safety)
     if [ -d "$file" ]; then
-      [ $VERBOSE -eq 1 ] && echo "Skipping directory: $file"
+      [ $VERBOSE -eq 1 ] && { set_display_path "$file"; echo "Skipping directory: $DISPLAY_PATH"; }
       continue
   fi
 
-  echo -n "Verifying $file ... "
+  set_display_path "$file"
+  echo -n "Verifying $DISPLAY_PATH ... "
 
   if [ "$mode" = "create" ]; then
     create_file_hash "$file"

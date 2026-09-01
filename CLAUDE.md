@@ -30,9 +30,12 @@ measurement of the work.** `du` reports allocated blocks while `shasum` hashes
 logical contents, and the two diverge in both directions: block rounding makes
 a one-byte file weigh a whole block more than it costs, a sparse file's holes
 are hashed but never allocated so it weighs less than it costs, and a second
-path to an inode `du` has already counted in that invocation carries no weight
-at all while still being hashed in full. None of it affects any verification
-result. The weights exist only to make the percentage and the estimate track
+path to an inode `du` has already counted in that invocation comes back from
+the batch with no size at all. That last case is recovered rather than
+accepted: any path the batch could not size is asked about individually, where
+`du` reports its real allocation, so hardlinks keep their weight and only a
+path that has genuinely gone disables the weighting. None of it affects any
+verification result. The weights exist only to make the percentage and the estimate track
 reality better than a file count does, which on a tree mixing multi-gigabyte
 originals with kilobyte metadata is a low bar. A path `du` returns nothing for
 is not treated as weighing zero: the display drops back to counting files
@@ -89,13 +92,15 @@ clock and legitimately differs between runs. Compare stderr as well as
 stdout. Comparing only stdout hid a parallel run that printed its summary and
 then exited 1 with no verdict banner at all, for as long as that bug existed.
 
-Test the interrupt **both ways**, because they exercise different code. A
-**process-group** signal (`set -m`, then `kill -INT -$PID`) is what Ctrl-C
-sends, and it reaches the workers on its own. A **direct** `kill -TERM $PID`
-reaches only this script, and is the case that needs the handler to signal the
-worker group itself: `xargs` neither forwards a signal to children it has
-already started nor waits for them once killed, so workers otherwise keep
-hashing after the tool has exited. Check for surviving `shasum` processes
+Test the interrupt **both ways**, because they exercise different code. Note
+that neither reaches the workers directly: the dispatch runs under `set -m`, so
+the worker tree sits in its own process group, and a terminal's Ctrl-C or a
+`kill -INT -$PID` reaches this script's group alone. `on_interrupt` propagating
+`SIGTERM` to `-$XPID` is what actually stops the workers in both cases, which
+matters because `xargs` neither forwards a signal to children it has already
+started nor waits for them once killed. Send a **process-group** signal
+(`set -m`, then `kill -INT -$PID`) for the Ctrl-C shape and a **direct**
+`kill -TERM $PID` for the other, and check for surviving `shasum` processes
 afterward, not just the exit status. `kill -TERM $PID` to a
 A plain `kill -INT` to a background job from a non-interactive shell is
 ignored outright, so that spelling passes while real Ctrl-C is broken.
@@ -161,6 +166,16 @@ README option list still agree. They have drifted apart before.
   workers were gone left them writing results into a deleted directory, which
   the shell reports as "No such file or directory" after the prompt has already
   returned.
+- A filename is untrusted input. Printing one straight to a terminal lets it
+  carry `ESC` and rewrite the report about itself, and a name that erases its
+  own `Mismatched` line is precisely the silent failure this tool exists to
+  prevent. Every path goes through `set_display_path` before output, which
+  replaces control bytes with `?`. Quoting the whole path with `%q` instead
+  would wrap every ordinary path containing a space, which on a media tree is
+  most of them. The result travels in a global rather than through `$( )`,
+  because a command substitution forks once per file; the common case is a
+  pattern match and an assignment with no subprocess. `set_display_path` is
+  exported alongside the other worker functions, since `hash_worker` calls it.
 - `! -path "*/.*"` filters hidden entries out of results but does **not** stop
   `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
   walk starts at `.`, which a bare `.*` matches, pruning the entire tree.

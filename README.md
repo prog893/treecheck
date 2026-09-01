@@ -59,10 +59,15 @@ do not line up against a full run. Ordering the walk needs a
 probed once at startup; where it is missing, the walk runs in filesystem order
 instead and says so on stderr. Nothing else about the run changes.
 
-Every nonzero failure counter is followed by the files behind it, capped at
-twenty per category. Knowing that one file out of nine thousand is corrupt is
-useless without knowing which one, and that answer should not require going
-back through the log.
+`Mismatched` and `I/O errors` are each followed by the files behind them,
+capped at twenty per category. Knowing that one file out of nine thousand is
+corrupt is useless without knowing which one, and that answer should not
+require going back through the log. `Missing/empty` gets no such list: on a
+fresh tree it is every file, and the fix is `-c` rather than a name.
+
+Control bytes in a filename are replaced with `?` for display. A name is
+untrusted input, and one carrying terminal escapes could otherwise rewrite the
+report about itself.
 
 Each outcome is counted separately, because they mean very different things:
 
