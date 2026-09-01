@@ -35,9 +35,9 @@ Mode: Verify only | Dir: /Volumes/Media | Depth: unlimited
 
 Verifying /Volumes/Media/a001.mxf ... sidecar found, computing hash... ✓
 Verifying /Volumes/Media/a002.mxf ... sidecar found, computing hash... ✓
-Verifying /Volumes/Media/notes.txt ... no sidecar!
 Verifying /Volumes/Media/a003.mxf ... sidecar found, computing hash... hash mismatch! (sidecar: dd0aec17..., computed: 968cc9a4...)
 Verifying /Volumes/Media/a004.mxf ... sidecar found, computing hash... unreadable!
+Verifying /Volumes/Media/notes.txt ... no sidecar!
 
 Scanned:         5 files
 Verified:        2
