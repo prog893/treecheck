@@ -163,11 +163,13 @@ The status line exists only on a terminal. Piped or redirected output carries
 none of it: every verdict appears exactly once, in walk order, so it can go
 through `grep` or into a log. The final `Elapsed` line is printed either way.
 
-Parallel output additionally carries no control characters, because a path
+Parallel output additionally guarantees one line per verdict, because a path
 holding a newline or a `0x01` byte is refused before any hashing starts and the
-run tells you to use `-j 1`. Serial output makes no such promise: `-j 1`
-supports those paths and prints them as they are, so a verdict line can span
-more than one line when a filename does.
+run tells you to use `-j 1`. Those two bytes are the only ones refused: any
+other control byte a filename happens to contain, a tab or an escape among
+them, is printed as it is by either engine. Serial output does not make even
+the one-line promise, since `-j 1` supports newline paths and prints them
+unaltered, so one verdict can span several lines when a filename does.
 
 ## How it works
 

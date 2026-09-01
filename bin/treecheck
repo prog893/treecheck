@@ -878,6 +878,12 @@ parallel_process_files() {
                 < "$WORK_INPUT" >/dev/null &
             XPID=$!
             set +m
+            # A signal landing between the launch above and the assignment
+            # of XPID would have found XPID empty, so the handler had no group
+            # to signal and the flow below would then have waited for a full
+            # run's worth of hashing. Re-running the handler here closes that
+            # window: it is idempotent, and by this point XPID is set.
+            [ "$INTERRUPTED" -eq 1 ] && on_interrupt
             progress_monitor "$TOTAL_FILES" "$XPID"
             # Wait here rather than in the signal handler, so the engine's
             # exit status is actually observed. A status above 128 means it
@@ -906,6 +912,12 @@ parallel_process_files() {
                 < "$WORK_INPUT" >/dev/null &
             XPID=$!
             set +m
+            # A signal landing between the launch above and the assignment
+            # of XPID would have found XPID empty, so the handler had no group
+            # to signal and the flow below would then have waited for a full
+            # run's worth of hashing. Re-running the handler here closes that
+            # window: it is idempotent, and by this point XPID is set.
+            [ "$INTERRUPTED" -eq 1 ] && on_interrupt
             xrc=0
             { wait "$XPID" || xrc=$?; } 2>/dev/null
             XPID=""
