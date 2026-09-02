@@ -83,7 +83,7 @@ fixture holding **all** outcome categories at once:
 | same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`) and the timing-dependent `Elapsed:` line, identical **stderr**, identical exit status |
 | path containing a newline or `0x01` under `-j > 1` | refused before any hashing, exit 1, message names `-j 1` |
 | a failing run under `-j > 1` | prints `Completed with errors` on stderr, not just a nonzero exit |
-| Ctrl-C at any point of a `-j > 1` run | never `Completed successfully`; reports `Interrupted`, a `Not reached` count, exit 130, and no worker chatter after the prompt returns |
+| Ctrl-C at any point of a `-j > 1` run | never `Completed successfully`; reports `Interrupted`, exit 130, and no worker chatter after the prompt returns. A `Not reached` count appears when records were actually left unreached, which a signal arriving after the last one returned legitimately leaves at zero |
 | Ctrl-C during a `-j 1` run | no further file is hashed after the signal, exit 130 |
 | a **direct** `SIGTERM` to a `-j > 1` run (`kill <pid>`, not the group) | no worker survives the exit, exit 130 |
 | a mismatch or I/O error in any engine | the summary names the offending paths under their counter |

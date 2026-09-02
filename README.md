@@ -99,8 +99,10 @@ still go stale, the same as one recorded a moment before the write.
 
 Status 130 is what an interrupted run returns. Ctrl-C stops the scan rather
 than abandoning it: the summary reports the counters for the files actually
-reached plus a `Not reached` count, and an interrupted run never reports the
-clean verdict, whatever those counters say.
+reached, and an interrupted run never reports the clean verdict, whatever
+those counters say. A `Not reached` line accounts for the files the run never
+got to, and is omitted when the signal happened to arrive after the last one
+had already been checked.
 
 Status 1 means the run could not confirm your data is intact. That covers three different situations: contents that changed, files the drive would not return, and a tree that could not be fully walked. Only the first is evidence of corruption, so read the counters rather than the exit code alone when diagnosing.
 

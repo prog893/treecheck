@@ -1025,6 +1025,13 @@ parallel_process_files() {
             # matters at this point is that a run missing any result can no
             # longer reach the clean verdict by any path.
             CNT_UNREACHED=$((CNT_UNREACHED+1))
+            # Keep the fallback cursor moving. If this index is the one
+            # NEEDS_PRINT is waiting on, leaving it parked here would make
+            # every later index fail the equality test below, silently
+            # suppressing every remaining fallback verdict.
+            if [ -n "$NP_NEXT" ] && [ "$expected" = "$NP_NEXT" ]; then
+                if IFS= read -r -u 3 NP_NEXT; then :; else NP_NEXT=""; fi
+            fi
             continue
         fi
         IFS=$'\t' read -r i rc line < "$RESULT_FILE" || {
