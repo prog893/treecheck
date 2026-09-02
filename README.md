@@ -156,7 +156,9 @@ it cannot return a size for some path the walk turned up, the status line falls
 back to counting files and drops the estimate rather than showing one it cannot
 support. A path `du` skips because it is a second link to an inode already
 counted is asked about individually first, so an ordinary hardlink does not
-cost the whole run its byte weighting. Sizes and rates use binary units, because `du`
+cost the whole run its byte weighting. A path that still yields no size after
+that, whether it has gone, cannot be stat'd or will not read, is what triggers
+the fallback. Sizes and rates use binary units, because `du`
 reports kibibytes: a `GiB` here is 1024 MiB, not 1000 MB.
 
 The status line is truncated to a single terminal row, using the width

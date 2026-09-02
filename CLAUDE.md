@@ -33,8 +33,9 @@ are hashed but never allocated so it weighs less than it costs, and a second
 path to an inode `du` has already counted in that invocation comes back from
 the batch with no size at all. That last case is recovered rather than
 accepted: any path the batch could not size is asked about individually, where
-`du` reports its real allocation, so hardlinks keep their weight and only a
-path that has genuinely gone disables the weighting. None of it affects any
+`du` reports its real allocation, so hardlinks keep their weight. Weighting is
+disabled only when that retry also yields no number, for whatever reason: the
+path has gone, or it cannot be stat'd, or the read fails. None of it affects any
 verification result. The weights exist only to make the percentage and the estimate track
 reality better than a file count does, which on a tree mixing multi-gigabyte
 originals with kilobyte metadata is a low bar. A path `du` returns nothing for
