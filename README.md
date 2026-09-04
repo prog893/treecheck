@@ -33,11 +33,14 @@ Recursion is the default. Pointing it at a volume means the whole volume.
 ```text
 Mode: Verify only | Dir: /Volumes/Media | Depth: unlimited
 
-Verifying /Volumes/Media/a001.mxf ... sidecar found, computing hash... ✓
-Verifying /Volumes/Media/a002.mxf ... sidecar found, computing hash... ✓
-Verifying /Volumes/Media/a003.mxf ... sidecar found, computing hash... hash mismatch! (sidecar: dd0aec17..., computed: 968cc9a4...)
-Verifying /Volumes/Media/a004.mxf ... sidecar found, computing hash... unreadable!
-Verifying /Volumes/Media/notes.txt ... no sidecar!
+ok       /Volumes/Media/a001.mxf
+ok       /Volumes/Media/a002.mxf
+MISMATCH /Volumes/Media/a003.mxf
+         recorded dd0aec17e0d1b0a4bb4a06e6d8f2c1907c5b3a44de91f0c2ab7e5d63f8091b2c
+         now      968cc9a41f7b2e05c3d8a96b40e17d2fa5c8b31e9047d6ca2b8f3e05179ad4b6
+io-error /Volumes/Media/a004.mxf
+         file could not be read
+missing  /Volumes/Media/notes.txt
 
 Scanned:         5 files
 Verified:        2
@@ -58,6 +61,12 @@ do not line up against a full run. Ordering the walk needs a
 `sort` that reads NUL-separated records (`sort -z`), which is not POSIX. It is
 probed once at startup; where it is missing, the walk runs in filesystem order
 instead and says so on stderr. Nothing else about the run changes.
+
+Each line is an outcome in a fixed column, then the path. The tokens are
+`ok`, `created`, `MISMATCH`, `missing`, `io-error` and `skipped`, so a run can
+be read down that column or filtered with `grep '^MISMATCH'`. Anything worth
+adding, the two hashes behind a mismatch or the reason behind an I/O error,
+goes on indented lines underneath.
 
 `Mismatched` and `I/O errors` are each followed by the files behind them,
 capped at twenty per category. Knowing that one file out of nine thousand is
@@ -142,13 +151,23 @@ Mode combinations:
 ## Progress
 
 On an interactive terminal the parallel engine shows live progress: completed
-verdicts scroll above a status line carrying the file count, how far along the
-run is, bytes done out of bytes total, elapsed time, throughput, an estimate
-of the time remaining, and what is currently being hashed.
+verdicts scroll above a block with one row per worker, and a summary row
+carrying the file count, how far along the run is, bytes done out of bytes
+total, elapsed time, throughput and an estimate of the time remaining.
 
 ```text
- / 171/1949 42% 1.2TiB/2.9TiB 11m03s 340.5MiB/s eta 2h04m hashing: A008_07091214_C071.braw
+  [ 1] /Volumes/Media/Coaster Shimokita Fest/BMD/A008_07091214_C071.braw
+  [ 2] ...aigan Brewing/R5C Internal/A007C118_2608294V_CANON.CRM
+  [ 3] /Volumes/Media/Chiba Ocean Broll/BMD/A012_10221001_C041.braw
+  [ 4] (idle)
+ / 171/1949 42% 1.2TiB/2.9TiB 11m03s 340.5MiB/s eta 2h04m
 ```
+
+A file holds its row until it finishes, so rows stay put instead of
+reshuffling every time a neighbour completes. A path too wide for the terminal
+keeps its tail, which is where the filename is, and is marked with a leading
+ellipsis. The block is capped to what fits above the summary row, with any
+remaining worker slots counted rather than drawn.
 
 The percentage and the estimate are weighted by bytes, not by file count. A
 media tree mixes multi-gigabyte originals with kilobyte metadata files, so
@@ -163,21 +182,21 @@ that, whether it has gone, cannot be stat'd or will not read, is what triggers
 the fallback. Sizes and rates use binary units, because `du`
 reports kibibytes: a `GiB` here is 1024 MiB, not 1000 MB.
 
-The status line is truncated to a single terminal row, using the width
-reported by `tput cols`, or 80 columns if that fails. That fallback is best
-effort rather than a guarantee: a terminal narrower than 80 columns can still
-wrap it. It is erased by returning to column zero and clearing to end of line,
-and the row a terminal returns to is the last one, so a status line allowed to
-wrap would leave its first row stranded in the scrollback for the rest of the
-run.
+Every row is truncated to a single terminal row. The width comes from
+`stty size` on the controlling terminal, falling back to `tput cols` and then
+to 80 columns, which is best effort rather than a guarantee: a terminal
+narrower than 80 columns can still wrap. A wrapped row matters because the
+block is erased by walking the cursor back up through it, and a row that
+wrapped puts part of itself beyond the cursor's reach, where it stays in the
+scrollback for the rest of the run.
 
 The status line exists only on a terminal. Piped or redirected output carries
 none of it: every verdict appears exactly once, in walk order, so it can go
 through `grep` or into a log. The final `Elapsed` line is printed either way.
 
-Every verdict is one line, in both engines, because control bytes in a
-filename are replaced with `?` before it is printed. That is what the display
-guarantees.
+A verdict is one line plus any indented detail lines under it, in both
+engines. Control bytes in a filename are replaced with `?` before it is
+printed, so a name can never add lines of its own.
 
 Separately, and for a different reason, the parallel engine refuses to hash a
 path whose real name holds a newline or a `0x01` byte, and tells you to rerun

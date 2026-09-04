@@ -87,6 +87,8 @@ fixture holding **all** outcome categories at once:
 | Ctrl-C during a `-j 1` run | no further file is hashed after the signal, exit 130 |
 | a **direct** `SIGTERM` to a `-j > 1` run (`kill <pid>`, not the group) | no worker survives the exit, exit 130 |
 | a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
+| every verdict line | an outcome token in a fixed column, then the path, with any detail indented beneath. Tokens: `ok`, `created`, `MISMATCH`, `missing`, `io-error`, `skipped` |
+| `Created` on a fresh tree | identical under `-j 1` and `-j > 1`. Both count from the creation log, because the sequential engine reads each verdict through a command substitution and a counter incremented in that subshell never comes back |
 
 Normalize the `Elapsed:` line before diffing the two engines; it is wall
 clock and legitimately differs between runs. Compare stderr as well as
@@ -197,6 +199,17 @@ README option list still agree. They have drifted apart before.
   (`Library/Homebrew/extend/pathname/write_mkpath_extension.rb`). Ruby's own
   `Pathname#write` and `File.write` both overwrite happily, so use `File.write`
   when a test deliberately corrupts a fixture.
+
+## Working the review
+
+Ask CodeRabbit to look again with `@coderabbitai resume`. `full review` is for
+recovering after a rate-limited attempt has marked commits as seen, not for
+routine re-review.
+
+Findings are answered in the **commit message** that fixes them, or in the PR
+description when they change what the PR is. A PR comment says which commit
+carries the fix and nothing else. Long per-finding writeups in comments are
+noise: they duplicate what the commit already records and bury the diff.
 
 ## Merge gate
 

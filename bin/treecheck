@@ -249,9 +249,22 @@ human_kb() {
 # onto a second row, after which the first row can never be erased and stays
 # behind in the scrollback for the rest of the run. Every status line is
 # therefore truncated to one row before it is drawn.
+# Asked of /dev/tty, not of stdout. These run inside a command substitution,
+# so stdout is a pipe, and tput then cannot read the window size from it and
+# quietly answers with the terminfo default of 80 columns. That truncated
+# every path on a wide terminal.
+term_size() {
+    local rc=""
+    rc=$(stty size < /dev/tty 2>/dev/null) || rc=""
+    printf '%s' "$rc"
+}
+
 term_cols() {
     local c=""
-    c=$(tput cols 2>/dev/null) || c=""
+    c=$(term_size); c=${c#* }
+    case "$c" in
+        ''|*[!0-9]*|0) c=$(tput cols 2>/dev/null) || c="" ;;
+    esac
     case "$c" in
         ''|*[!0-9]*|0) c=80 ;;
     esac
@@ -294,6 +307,24 @@ set_display_path() {
         *)
             DISPLAY_PATH=$1 ;;
     esac
+}
+
+# Render one verdict: the outcome token in a fixed column, then the path, then
+# any detail lines indented under it. Splitting on the first newline rather
+# than using an array keeps this usable from an exported worker function.
+VERDICT_W=8
+print_verdict() {
+    local out="$1" path="$2" token detail line
+    token=${out%%$'\n'*}
+    if [ "$out" = "$token" ]; then detail=""; else detail=${out#*$'\n'}; fi
+    printf '%-*s %s\n' "$VERDICT_W" "$token" "$path"
+    if [ -n "$detail" ]; then
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf '%-*s %s\n' "$VERDICT_W" "" "$line"
+        done <<< "$detail"
+    fi
+    return 0
 }
 
 # Name the files behind a nonzero counter. Both engines collect these in
@@ -347,6 +378,10 @@ compute_hash() {
     printf '%s' "${out%% *}"
 }
 
+# Emits the verdict as a token on the first line, then any detail lines. The
+# caller pairs the token with the path and indents the detail under it, so the
+# outcome sits in a fixed column that reads down the page and greps cleanly.
+#
 # Status: 0 verified, 1 mismatch, 2 no usable sidecar, 3 I/O error
 verify_file_hash() {
     # hash_file must be its own statement: in one combined "local", ${file}
@@ -357,36 +392,35 @@ verify_file_hash() {
     local stored_hash current_hash
 
     if [ ! -f "$hash_file" ]; then
-        echo "no sidecar!"
+        printf 'missing\n'
         return 2
     fi
 
     if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
-        echo "sidecar unreadable!"
+        printf 'io-error\nsidecar could not be read\n'
         return 3
     fi
     [ -z "$stored_hash" ] && {
-        echo "empty sidecar!"
+        printf 'missing\nsidecar is empty\n'
         return 2
     }
 
-    echo -n "sidecar found, computing hash... "
     current_hash=$(compute_hash "$file")
     if [ -z "$current_hash" ]; then
-        echo "unreadable!"
+        printf 'io-error\nfile could not be read\n'
         return 3
     fi
 
     if [ "$stored_hash" = "$current_hash" ]; then
-        echo "✓"
+        printf 'ok\n'
         return 0
     else
-        echo "hash mismatch! (sidecar: $stored_hash, computed: $current_hash)"
+        printf 'MISMATCH\nrecorded %s\nnow      %s\n' "$stored_hash" "$current_hash"
         return 1
     fi
 }
 
-# Returns status code and message
+# Same contract as verify_file_hash: a token, then any detail lines.
 create_file_hash() {
     # hash_file must be its own statement: in one combined "local", ${file}
     # still holds the CALLER'S value, so the sidecar path silently resolved
@@ -399,27 +433,26 @@ create_file_hash() {
     if [ -f "$hash_file" ] && [ $FORCE -eq 0 ]; then
         local stored_hash
         if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
-            echo "sidecar unreadable!"
+            printf 'io-error\nsidecar could not be read\n'
             return 3
         fi
         if [ -n "$stored_hash" ]; then
             # Verify existing hash unless NO_VERIFY is set
             if [ $NO_VERIFY -eq 0 ]; then
-                echo -n "sidecar found, computing hash... "
                 current_hash=$(compute_hash "$file")
                 if [ -z "$current_hash" ]; then
-                    echo "unreadable!"
+                    printf 'io-error\nfile could not be read\n'
                     return 3
                 fi
                 if [ "$stored_hash" = "$current_hash" ]; then
-                    echo "✓"
+                    printf 'ok\n'
                     return 0
                 else
-                    echo "hash mismatch! (sidecar: $stored_hash, computed: $current_hash)"
+                    printf 'MISMATCH\nrecorded %s\nnow      %s\n' "$stored_hash" "$current_hash"
                     return 1
                 fi
             else
-                echo "sidecar found, skipping verification"
+                printf 'skipped\nsidecar already exists, not verified\n'
                 return 4
             fi
         fi
@@ -427,15 +460,9 @@ create_file_hash() {
 
     # Create new hash. A file that cannot be read must not get a sidecar,
     # otherwise an empty hash would be recorded as though it were the truth.
-    #
-    # Everything below completes the single line this function was called on.
-    # Reporting the creation and the read-back on separate lines made create
-    # mode the only path emitting more than one line per file, which the
-    # parallel engine then had to escape and rebuild, and rebuilt wrongly.
-    echo -n "no sidecar, creating... "
     current_hash=$(compute_hash "$file")
     if [ -z "$current_hash" ]; then
-        echo "unreadable!"
+        printf 'io-error\nfile could not be read\n'
         return 3
     fi
     # The write's stderr stays silent: bash would otherwise interleave its own
@@ -445,7 +472,7 @@ create_file_hash() {
     # matters: once the failing redirect is reached, stderr must already be
     # somewhere harmless or the diagnostic escapes anyway.
     if ! echo "$current_hash" 2>/dev/null > "$hash_file"; then
-        echo "cannot write sidecar!"
+        printf 'io-error\nsidecar could not be written\n'
         # Distinct from the read-failure status on purpose: parallel workers
         # need to know the write itself failed, so creation is not counted
         # for a sidecar that never landed. Both engines map it to I/O errors.
@@ -465,37 +492,37 @@ create_file_hash() {
         # stderr redirected before the target so a failed redirect cannot
         # leak the shell's own diagnostic past the suppression.
         if ! printf '%s\n' "$file" 2>/dev/null >> "$CREATED_LOG"; then
-            echo "created, but cannot record creation event!"
+            printf 'created\ncreation event could not be recorded\n'
             return 6
         fi
     fi
 
     # Read the sidecar back and compare it against the digest still in hand.
     #
-    # The digest is NOT recomputed from the source here. Doing that read every
-    # file a second time, doubling the I/O of every create run, and the only
-    # thing the second read can catch beyond this comparison is media that
+    # The digest is NOT recomputed from the source here. Doing that would read
+    # every file a second time, doubling the I/O of every create run, and the
+    # only thing the second read can catch beyond this comparison is media that
     # returns different bytes on consecutive reads. What the read-back is for
     # is proving the sidecar landed intact, and comparing its contents against
     # the hash just written proves exactly that.
     if [ $NO_VERIFY -eq 0 ]; then
         local stored_hash
         if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
-            echo "created, but sidecar unreadable!"
+            printf 'io-error\nsidecar written but could not be read back\n'
             return 3
         fi
         if [ "$stored_hash" = "$current_hash" ]; then
-            echo "created, sidecar verified ✓"
+            printf 'created\n'
             return 0
         else
-            echo "created, but read-back mismatch! (sidecar: $stored_hash, computed: $current_hash)"
+            printf 'MISMATCH\nsidecar read back as %s\nexpected             %s\n' "$stored_hash" "$current_hash"
             return 1
         fi
     fi
 
     # Sidecar was written but deliberately not read back, so it has not been
     # verified and must not be counted as though it had been.
-    echo "created (not read back)"
+    printf 'created\nnot read back\n'
     return 4
 }
 
@@ -529,28 +556,27 @@ hash_worker() {
     else
         out=$(verify_file_hash "$f" 2>&1); rc=$?
     fi
-    # One record must be one physical line, so any newline travels escaped
-    # and is restored just before display. Every verdict is single-line now,
-    # which leaves this as a backstop against anything unexpected reaching
-    # the merged stderr rather than a path the normal run takes.
+    # One record must be one physical line, and a verdict legitimately spans
+    # several once it carries detail, so newlines travel escaped and are
+    # restored just before display.
     #
     # The replacement MUST come from the environment. Written literally as
     # $'\001' it does not survive the trip: export -f re-serializes the body
     # through bash's own pretty-printer, which renders the ANSI-C escape as a
     # quoted control character, and the child re-parses that into TWO
-    # replacements per match. That is what turned create mode's second line
-    # into a blank line followed by the verdict, under -j > 1 only. The
-    # pattern side round-trips correctly and is left as it was.
-    out=${out//$'\n'/"$ESC_NL"}
+    # replacements per match. The pattern side round-trips correctly and is
+    # left as it was.
     # Each result lands in its own index-named file. Appending to one shared
     # file is only collision-free while every write stays under the stdio
     # buffer size, and a deep path plus a mismatch diagnostic can exceed
     # that; interleaved halves would corrupt the stream.
+    out=$(print_verdict "$out" "$DISPLAY_PATH")
+    out=${out//$'\n'/"$ESC_NL"}
     # stderr silenced BEFORE the target is named: an interrupted run can tear
     # the results directory down while a worker is still finishing, and the
     # shell would otherwise print its own "No such file or directory" for each
     # one, after the summary and even after the prompt has come back.
-    printf '%s\t%s\tVerifying %s ... %s\n' "$i" "$rc" "$DISPLAY_PATH" "$out" \
+    printf '%s\t%s\t%s\n' "$i" "$rc" "$out" \
         2>/dev/null > "$RESULTS_DIR/$i"
     if [ -n "${DONE_LOG:-}" ]; then
         # A lost event means the live view skips this verdict; the ordered
@@ -684,6 +710,63 @@ collect_sizes() {
     return 0
 }
 
+# Height of the terminal, for keeping the whole status block on screen. The
+# block is erased by moving the cursor up through it, and a block taller than
+# the terminal scrolls, which puts rows beyond the cursor's reach and leaves
+# them behind. Falls back to 24, the classic default.
+term_lines() {
+    local l=""
+    l=$(term_size); l=${l%% *}
+    case "$l" in
+        ''|*[!0-9]*|0) l=$(tput lines 2>/dev/null) || l="" ;;
+    esac
+    case "$l" in
+        ''|*[!0-9]*|0) l=24 ;;
+    esac
+    printf '%s' "$l"
+}
+
+# Keep the tail of an over-long path, which is where the filename is, and mark
+# the cut with a leading ellipsis.
+fit_path() {
+    local p="$1" w="$2"
+    if [ "${#p}" -le "$w" ]; then
+        printf '%s' "$p"
+    elif [ "$w" -gt 1 ]; then
+        printf '...%s' "${p:$(( ${#p} - w + 3 ))}"
+    else
+        printf '%s' "${p:0:$w}"
+    fi
+}
+
+# Erase the status block by walking the cursor back up through it. Every write
+# that is not part of the block has to be preceded by this, or the block ends
+# up interleaved with the verdicts scrolling past it.
+BLOCK_H=0
+
+# Put the cursor back on the block's first row WITHOUT clearing anything, so a
+# redraw overwrites in place. Clearing first and drawing after leaves the block
+# blank for the gap between the two, which at two ticks a second reads as a
+# flicker.
+block_home() {
+    [ "$BLOCK_H" -gt 0 ] || return 0
+    printf '\r'
+    [ "$BLOCK_H" -gt 1 ] && printf '\033[%dA' "$((BLOCK_H-1))"
+    return 0
+}
+
+erase_block() {
+    [ "$BLOCK_H" -gt 0 ] || return 0
+    local i=1
+    printf '\r\033[K'
+    while [ "$i" -lt "$BLOCK_H" ]; do
+        printf '\033[1A\r\033[K'
+        i=$((i+1))
+    done
+    BLOCK_H=0
+    return 0
+}
+
 progress_monitor() {
     local total="$1" xpid="$2"
     # Both event logs are consumed through byte offsets, so each tick pays
@@ -692,24 +775,38 @@ progress_monitor() {
     # appended as they arrive, completed ones are filtered out, and its
     # size never exceeds the number of workers actually mid-file.
     local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
-    local inflight rate_x10 pct a1 a2 a3 done_kb=0 elapsed rate_kb eta
-    local cols statusline
+    local rate_x10 pct done_kb=0 elapsed rate_kb eta
+    local cols lines statusline maxrows shown slot row evline ev_idx ev_path
+    SLOT_IDX=() SLOT_PATH=()
     while [ "$INTERRUPTED" -eq 0 ] && kill -0 "$xpid" 2>/dev/null; do
         if ! consume_new "$INFLIGHT" "$ioff"; then
-            printf '\r\033[Kprogress events unreadable; retrying\n'
+            erase_block
+            printf 'progress events unreadable; retrying\n'
             sleep 0.5
             continue
         fi
         if [ "$CONSUMED" -gt 0 ]; then
             ioff=$((ioff+CONSUMED))
             while IFS= read -r evline; do
-                if ! printf '%s\n' "$evline" 2>/dev/null >> "$ACTIVE"; then
-                    echo "treecheck: the live file list could not be updated" >&2
-                fi
+                # Claim the first free slot. A file keeps that row until it
+                # finishes, so rows stay put instead of reshuffling every time
+                # a neighbour completes.
+                ev_idx=${evline%%$'\t'*}
+                ev_path=${evline#*$'\t'}
+                slot=0
+                while [ "$slot" -lt "$JOBS" ]; do
+                    if [ -z "${SLOT_IDX[$slot]:-}" ]; then
+                        SLOT_IDX[slot]=$ev_idx
+                        SLOT_PATH[slot]=$ev_path
+                        break
+                    fi
+                    slot=$((slot+1))
+                done
             done < "$MONBUF"
         fi
         if ! consume_new "$DONE_LOG" "$doff"; then
-            printf '\r\033[Kprogress events unreadable; retrying\n'
+            erase_block
+            printf 'progress events unreadable; retrying\n'
             sleep 0.5
             continue
         fi
@@ -724,42 +821,35 @@ progress_monitor() {
                 # is left. An index with no recorded size contributes zero,
                 # which loses a little accuracy and never stalls the display.
                 done_kb=$((done_kb + ${SIZE_KB[$idx]:-0}))
-                # The completed index leaves the active set; grep status 1
-                # means nothing was left, which is fine. Anything else, or a
-                # failed replacement, degrades the display and says so.
-                local grc=0
-                grep -v "^${idx}"$'\t' "$ACTIVE" \
-                    > "$ACTIVE.new" 2>/dev/null || grc=$?
-                if [ $grc -gt 1 ]; then
-                    printf '\r\033[Kcould not update the live file list\n'
-                fi
-                if ! mv "$ACTIVE.new" "$ACTIVE"; then
-                    printf '\r\033[Kcould not update the live file list\n'
-                fi
+                # The completed index gives its row back.
+                slot=0
+                while [ "$slot" -lt "$JOBS" ]; do
+                    if [ "${SLOT_IDX[$slot]:-}" = "$idx" ]; then
+                        SLOT_IDX[slot]=""
+                        SLOT_PATH[slot]=""
+                        break
+                    fi
+                    slot=$((slot+1))
+                done
                 if ! printf '%s\n' "$idx" 2>/dev/null >> "$STREAMED_LOG"; then
-                    printf '\r\033[Kcould not record a display ledger entry; that verdict will appear again in walk order\n'
+                    erase_block
+                    printf 'could not record a display ledger entry; that verdict will appear again in walk order\n'
                     continue
                 fi
                 if [ -s "$RESULTS_DIR/$idx" ]; then
                     IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
                     line=${line//"$ESC_NL"/$'\n'}
-                    printf '\r\033[K%s\n' "$line"
+                    erase_block
+                    printf '%s\n' "$line"
                 fi
             done < "$MONBUF"
         fi
-        # Last three started-but-not-finished paths, oldest first.
-        a1="" a2="" a3=""
-        while IFS=$'\t' read -r _ apath; do
-            a1=$a2; a2=$a3; a3=${apath##*/}
-        done < "$ACTIVE"
-        inflight=""
-        [ -n "$a1" ] && inflight="$a1"
-        [ -n "$a2" ] && inflight="${inflight:+$inflight, }$a2"
-        [ -n "$a3" ] && inflight="${inflight:+$inflight, }$a3"
         elapsed=$((SECONDS-start))
-        # Re-read every tick so a mid-run resize cannot reintroduce a wrapped
-        # row that nothing is able to erase afterwards.
+        # Re-read both every tick so a mid-run resize cannot leave a row that
+        # nothing is able to erase afterwards.
         cols=$(term_cols)
+        lines=$(term_lines)
+
         if [ "$BYTES_OK" -eq 1 ]; then
             # Throughput over the whole run so far, not an instantaneous
             # sample: a per-tick rate on a mix of huge and tiny files swings
@@ -772,12 +862,10 @@ progress_monitor() {
             else
                 eta="--"
             fi
-            statusline=$(printf ' %s %d/%d %d%% %s/%s %s %s/s eta %s hashing: %s' \
+            statusline=$(printf ' %s %d/%d %d%% %s/%s %s %s/s eta %s' \
                 "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
                 "$(human_kb "$done_kb")" "$(human_kb "$TOTAL_KB")" \
-                "$(fmt_dur "$elapsed")" "$(human_kb "$rate_kb")" "$eta" \
-                "${inflight:-...}")
-            printf '\r\033[K%s' "${statusline:0:$((cols-1))}"
+                "$(fmt_dur "$elapsed")" "$(human_kb "$rate_kb")" "$eta")
         else
             # No usable sizes, so the percentage falls back to the file count
             # and there is nothing honest to base an estimate on.
@@ -786,19 +874,41 @@ progress_monitor() {
             [ "$elapsed" -gt 0 ] && rate_x10=$((done*10/elapsed))
             pct=0
             if [ "$total" -gt 0 ]; then pct=$((done*100/total)); fi
-            statusline=$(printf ' %s %d/%d %d%% %s %d.%d files/s hashing: %s' \
+            statusline=$(printf ' %s %d/%d %d%% %s %d.%d files/s' \
                 "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
-                "$(fmt_dur "$elapsed")" "$((rate_x10/10))" "$((rate_x10%10))" \
-                "${inflight:-...}")
-            printf '\r\033[K%s' "${statusline:0:$((cols-1))}"
+                "$(fmt_dur "$elapsed")" "$((rate_x10/10))" "$((rate_x10%10))")
         fi
+
+        # One row per worker slot, so a row keeps its place instead of jumping
+        # as neighbours finish. Capped to what the terminal can hold alongside
+        # the summary row, with the remainder counted rather than drawn.
+        maxrows=$((lines-3))
+        [ "$maxrows" -lt 1 ] && maxrows=1
+        shown="$JOBS"
+        [ "$shown" -gt "$maxrows" ] && shown="$maxrows"
+        block_home
+        slot=0
+        while [ "$slot" -lt "$shown" ]; do
+            row=$(printf '  [%2d] %s' "$((slot+1))" \
+                "$(fit_path "${SLOT_PATH[$slot]:-(idle)}" $((cols-8)))")
+            printf '%s\033[K\n' "${row:0:$((cols-1))}"
+            slot=$((slot+1))
+        done
+        if [ "$JOBS" -gt "$shown" ]; then
+            printf '  +%d more worker slots\033[K\n' "$((JOBS-shown))"
+            BLOCK_H=$((shown+2))
+        else
+            BLOCK_H=$((shown+1))
+        fi
+        printf '%s\033[K' "${statusline:0:$((cols-1))}"
         spin=$((spin+1))
         sleep 0.5
     done
     # Final drain for events that landed between the last poll and exit.
     # On a failed read the ordered replay picks everything up anyway.
     if ! consume_new "$DONE_LOG" "$doff"; then
-        printf '\r\033[Kprogress events unreadable\n'
+        erase_block
+        printf 'progress events unreadable\n'
     fi
     if [ "$CONSUMED" -gt 0 ]; then
         while IFS= read -r idx; do
@@ -809,11 +919,12 @@ progress_monitor() {
             if [ -s "$RESULTS_DIR/$idx" ]; then
                 IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
                 line=${line//"$ESC_NL"/$'\n'}
-                printf '\r\033[K%s\n' "$line"
+                erase_block
+                printf '%s\n' "$line"
             fi
         done < "$MONBUF"
     fi
-    printf '\r\033[K'
+    erase_block
 }
 
 # Start the worker engine and set XPID. Split from the wait below, with the
@@ -888,10 +999,6 @@ parallel_process_files() {
     local mode="$1"
     RESULTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary directory"; exit 1; }
     WORK_INPUT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
-    CREATED_LOG=""
-    if [ "$mode" = "create" ]; then
-        CREATED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
-    fi
 
     # The parallel engine needs xargs -P, which is common but not part of
     # POSIX xargs. Probe once up front instead of dying mid-walk.
@@ -916,7 +1023,8 @@ parallel_process_files() {
         STREAMED=1
     fi
     export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG ESC_NL
-    export -f hash_worker verify_file_hash create_file_hash compute_hash set_display_path
+    export VERDICT_W
+    export -f hash_worker verify_file_hash create_file_hash compute_hash set_display_path print_verdict
 
     echo "Hashing with $JOBS parallel workers..."
 
@@ -1128,11 +1236,19 @@ parallel_process_files() {
 }
 
 process_files() {
-    local mode="$1" skipped=0
+    local mode="$1" skipped=0 seq_event_failures=0 vout vrc
     local find_expr=()
     CNT_SCANNED=0 CNT_OK=0 CNT_MISMATCH=0 CNT_MISSING=0 CNT_IOERR=0 CNT_CREATED=0 CNT_UNVERIFIED=0
     CNT_UNVERIFIED_AFTER_EVENT_FAIL=0
     CNT_UNREACHED=0
+    # Both engines count creations from this log rather than from a counter.
+    # The sequential engine reads each verdict through a command substitution,
+    # which runs the function in a subshell, so a counter it incremented there
+    # would never come back. The log is the one mechanism that works for both.
+    CREATED_LOG=""
+    if [ "$mode" = "create" ]; then
+        CREATED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    fi
 
     # Build find expression.
     #
@@ -1236,25 +1352,38 @@ while IFS= read -r -d '' file; do
   fi
 
   set_display_path "$file"
-  printf 'Verifying %s ... ' "$DISPLAY_PATH"
-
   if [ "$mode" = "create" ]; then
-    create_file_hash "$file"
+    vout=$(create_file_hash "$file" 2>&1); vrc=$?
   else
-    verify_file_hash "$file"
+    vout=$(verify_file_hash "$file" 2>&1); vrc=$?
   fi
+  print_verdict "$vout" "$DISPLAY_PATH"
 
   # 0 verified, 1 mismatch, 2 no usable sidecar, 3 I/O error,
   # 4 recorded but not read back
-  case $? in
+  case $vrc in
     0) CNT_OK=$((CNT_OK+1)) ;;
     1) CNT_MISMATCH=$((CNT_MISMATCH+1)); record_mismatch "$file" ;;
     2) CNT_MISSING=$((CNT_MISSING+1)) ;;
     3) CNT_IOERR=$((CNT_IOERR+1)); record_ioerr "$file" ;;
     4) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1)) ;;
     5) CNT_IOERR=$((CNT_IOERR+1)); record_ioerr "$file" ;;
+    6) CNT_UNVERIFIED=$((CNT_UNVERIFIED+1))
+       seq_event_failures=$((seq_event_failures+1))
+       CNT_UNVERIFIED_AFTER_EVENT_FAIL=$((CNT_UNVERIFIED_AFTER_EVENT_FAIL+1)) ;;
   esac
 done < "$FILE_LIST"
+if [ "$mode" = "create" ]; then
+    if ! CREATED_COUNT=$(wc -l < "$CREATED_LOG"); then
+        error "could not read the creation log"
+        exit 1
+    fi
+    CNT_CREATED=${CREATED_COUNT//[[:space:]]/}
+    CNT_CREATED=$((CNT_CREATED+seq_event_failures))
+fi
+if [ "$seq_event_failures" -gt 0 ]; then
+    error "$seq_event_failures sidecar(s) were created but their creation event could not be recorded; the Created count in the summary below still includes them"
+fi
 fi
 
 # Calculate skipped files if verbose
