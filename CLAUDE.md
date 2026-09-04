@@ -5,12 +5,43 @@ dependency tiers:
 
 - Core (every run): `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`,
   `mktemp`, `wc`.
+- Ordered walk (optional, every run that can have it): a `sort` accepting
+  `-z` for NUL-separated records, which is not POSIX. It is probed once at
+  startup. Without it the walk keeps filesystem order and the run says so on
+  stderr; nothing else changes, and no verification result depends on it.
+  Sorting is a diffability property, not a correctness one, and it describes
+  **completed** walks: an interrupted run stops at whatever point it reached,
+  so its counters, its recap and the set of files it covered are all partial
+  and are not comparable against a full run.
 - Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
   `-P`, which is common but not POSIX; probed before dispatching instead of
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
   a fallback to 1. An explicit `-j 1` needs nothing from this tier.
 - Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
-  `grep`, `mv`, `sleep`. Never used for piped output.
+  `grep`, `mv`, `sleep`, `du`, `tput`. Never used for piped output. `tput cols`
+  keeps the status line inside one terminal row; a failure falls back to 80
+  columns, which is best effort rather than a guarantee, since a terminal
+  narrower than 80 columns will still wrap and strand a row.
+
+Sizes for the progress display come from `du -k`, not `stat`: `du -k` is
+spelled identically on BSD and GNU where `stat` needs `-f%z` on one and
+`-c%s` on the other. Those sizes are a **weighting heuristic, not a
+measurement of the work.** `du` reports allocated blocks while `shasum` hashes
+logical contents, and the two diverge in both directions: block rounding makes
+a one-byte file weigh a whole block more than it costs, a sparse file's holes
+are hashed but never allocated so it weighs less than it costs, and a second
+path to an inode `du` has already counted in that invocation comes back from
+the batch with no size at all. That last case is recovered rather than
+accepted: any path the batch could not size is asked about individually, where
+`du` reports its real allocation, so hardlinks keep their weight. Weighting is
+disabled only when that retry also yields no number, for whatever reason: the
+path has gone, or it cannot be stat'd, or the read fails. None of it affects any
+verification result. The weights exist only to make the percentage and the estimate track
+reality better than a file count does, which on a tree mixing multi-gigabyte
+originals with kilobyte metadata is a low bar. A path `du` returns nothing for
+is not treated as weighing zero: the display drops back to counting files
+rather than run against totals that omit it. Every part of that path is
+optional, and any failure leaves the display counting files.
 
 Anything a minimal container strips beyond the tier it exercises is a real
 portability break.
@@ -49,8 +80,35 @@ fixture holding **all** outcome categories at once:
 | unreadable **hidden** dir (`.Trashes`) | pruned, no error |
 | unreadable **non-hidden** dir | walk fails, exit 1 |
 | create-only run over a fresh tree (`-c -n`) | counted as `Not verified`, never as `Verified` |
-| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`), identical exit status |
+| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`) and the timing-dependent `Elapsed:` line, identical **stderr**, identical exit status |
 | path containing a newline or `0x01` under `-j > 1` | refused before any hashing, exit 1, message names `-j 1` |
+| a failing run under `-j > 1` | prints `Completed with errors` on stderr, not just a nonzero exit |
+| Ctrl-C at any point of a `-j > 1` run | never `Completed successfully`; reports `Interrupted`, exit 130, and no worker chatter after the prompt returns. A `Not reached` count appears when records were actually left unreached, which a signal arriving after the last one returned legitimately leaves at zero |
+| Ctrl-C during a `-j 1` run | no further file is hashed after the signal, exit 130 |
+| a **direct** `SIGTERM` to a `-j > 1` run (`kill <pid>`, not the group) | no worker survives the exit, exit 130 |
+| a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
+| every verdict line | an outcome token in a fixed column, then the path, with any detail indented beneath. Tokens: `ok`, `created`, `MISMATCH`, `missing`, `io-error`, `skipped` |
+| `Created` on a fresh tree | identical under `-j 1` and `-j > 1`. Both count from the creation log, because the sequential engine reads each verdict through a command substitution and a counter incremented in that subshell never comes back |
+
+Normalize the `Elapsed:` line before diffing the two engines; it is wall
+clock and legitimately differs between runs. Compare stderr as well as
+stdout. Comparing only stdout hid a parallel run that printed its summary and
+then exited 1 with no verdict banner at all, for as long as that bug existed.
+
+Test the interrupt **both ways**, because they exercise different code. Note
+that neither reaches the workers directly: the dispatch runs under `set -m`, so
+the worker tree sits in its own process group, and a terminal's Ctrl-C or a
+`kill -INT -$PID` reaches this script's group alone. `on_interrupt` propagating
+`SIGTERM` to `-$XPID` is what actually stops the workers in both cases, which
+matters because `xargs` neither forwards a signal to children it has already
+started nor waits for them once killed. Send a **process-group** signal
+(`set -m`, then `kill -INT -$PID`) for the Ctrl-C shape and a **direct**
+`kill -TERM $PID` for the other, and check for surviving `shasum` processes
+afterward, not just the exit status.
+A plain `kill -INT` to a background job from a non-interactive shell is
+ignored outright, so that spelling passes while real Ctrl-C is broken.
+Interrupt at several different moments, not one, and confirm that a run which
+simply finished before the signal still exits 0.
 
 Confirm exit status every time, since it is a documented interface:
 
@@ -58,6 +116,7 @@ Confirm exit status every time, since it is a documented interface:
 0   clean
 1   verification failed: a mismatch, an I/O error, or a failed walk
 2   nothing corrupt, but some files have no usable sidecar
+130 interrupted: only the files reported as scanned were checked
 ```
 
 Status 2 is the non-strict case. Under `--strict` a missing or empty sidecar
@@ -80,6 +139,57 @@ README option list still agree. They have drifted apart before.
   `if` was restructured.
 - A `find` inside a process substitution loses its exit status, and its stderr
   is easy to discard by accident. Run the walk to a file so failure survives.
+- A bare `exec` carrying a redirection applies that redirection to the
+  **shell**, permanently, not to one command. `exec 3<&- 2>/dev/null`, written
+  to hush a close of a descriptor that might not be open, silently routed
+  every later diagnostic to `/dev/null`: a failing parallel run printed its
+  summary and then exited 1 with no `Completed with errors` and no `error()`
+  output whatsoever. Closing an unopened descriptor succeeds anyway, so the
+  suppression bought nothing. Where a redirection really is wanted around
+  `exec`, wrap it in a group: `{ exec 3<&-; } 2>/dev/null`.
+- `export -f` does not ship the function's source text. Bash re-serializes the
+  body through its own pretty-printer, which renders `$'\n'` and `$'\001'` as
+  quoted literal control characters, and the child re-parses those differently:
+  `out=${out//$'\n'/$'\001'}` replaced one newline with **two** `0x01` bytes in
+  a worker while behaving correctly in the parent. Anything an exported
+  function substitutes must come from the environment, not from an ANSI-C
+  literal at the point of use. The pattern side round-trips; the replacement
+  side does not.
+- A trap that fires while the shell is sitting inside a command substitution
+  runs **in that subshell**, so an assignment it makes is discarded and the
+  parent never sees it. An INT handler setting `INTERRUPTED=1` was therefore
+  unreliable exactly in the monitor loop, which is dense with `$(...)` calls,
+  and a Ctrl-C could be swallowed into reporting `Completed successfully` on a
+  run that had checked 52 of 1949 files. Never let a verdict depend on a flag a
+  trap sets: derive it from a fact the parent observes directly, here the
+  engine's wait status (above 128 means it died from a signal) plus the count of
+  results that actually came back.
+- `wait` interrupted by a caught signal returns **as soon as the handler has
+  run**, with a status above 128, and the child is neither exited nor reaped at
+  that point. Verify in isolation if in doubt: a trapped `TERM` makes `wait`
+  return 143 while the child is demonstrably still alive, and a second `wait`
+  collects it. Anything that must not outlive the child, cleanup above all, has
+  to keep waiting until the process is actually gone rather than trusting the
+  first return. Tests that `sleep` before checking for survivors will not catch
+  this, because the sleep is long enough for the children to die by themselves.
+- `wait` belongs in the main flow, not in the signal handler. Waiting in the
+  handler consumed the status the main flow needed, and cleaning up before the
+  workers were gone left them writing results into a deleted directory, which
+  the shell reports as "No such file or directory" after the prompt has already
+  returned.
+- Print a filename with `printf '%s'`, never `echo`. Under `xpg_echo` bash's
+  `echo` expands backslash escapes in its argument, so a name holding a literal
+  backslash-n reaches the terminal as a line break and splits a verdict in two.
+- A filename is untrusted input. Printing one straight to a terminal lets it
+  carry `ESC` and rewrite the report about itself, and a name that erases its
+  own `Mismatched` line is precisely the silent failure this tool exists to
+  prevent. Every path goes through `set_display_path` before output, which
+  replaces control bytes with `?`. Quoting the whole path with `%q` instead
+  would wrap every ordinary path containing a space, which on a media tree is
+  most of them. The result travels in a global rather than through `$( )`,
+  because a command substitution forks once per file; the common case is a
+  pattern match and an assignment with no subprocess. `set_display_path` is
+  exported alongside the other worker functions, since `hash_worker` calls it.
 - `! -path "*/.*"` filters hidden entries out of results but does **not** stop
   `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
   walk starts at `.`, which a bare `.*` matches, pruning the entire tree.
@@ -89,6 +199,17 @@ README option list still agree. They have drifted apart before.
   (`Library/Homebrew/extend/pathname/write_mkpath_extension.rb`). Ruby's own
   `Pathname#write` and `File.write` both overwrite happily, so use `File.write`
   when a test deliberately corrupts a fixture.
+
+## Working the review
+
+Ask CodeRabbit to look again with `@coderabbitai resume`. `full review` is for
+recovering after a rate-limited attempt has marked commits as seen, not for
+routine re-review.
+
+Findings are answered in the **commit message** that fixes them, or in the PR
+description when they change what the PR is. A PR comment says which commit
+carries the fix and nothing else. Long per-finding writeups in comments are
+noise: they duplicate what the commit already records and bury the diff.
 
 ## Merge gate
 
