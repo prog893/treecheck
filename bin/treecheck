@@ -172,7 +172,7 @@ remove_tmp_dir() {
 cleanup_tmp() {
     # Erase the status line on the way out. Ctrl-C during a long run otherwise
     # leaves a half-drawn bar sitting above the next shell prompt.
-    [ "$STREAMED" -eq 1 ] && [ -t 1 ] && printf '\r\033[K'
+    [ "$STREAMED" -eq 1 ] && [ -t 1 ] && printf '\r\033[K\033[?25h'
     # The derived names use ${VAR:+...} so that an unset base contributes
     # nothing at all. Spelled "${VAR:-}.sorted" they would collapse to the
     # bare suffix ".sorted" whenever the base was unset, which the guard then
@@ -755,6 +755,8 @@ block_home() {
     return 0
 }
 
+CURSOR_HIDE=$'\033[?25l'
+CURSOR_SHOW=$'\033[?25h'
 erase_block() {
     [ "$BLOCK_H" -gt 0 ] || return 0
     local i=1
@@ -764,6 +766,8 @@ erase_block() {
         i=$((i+1))
     done
     BLOCK_H=0
+    # The cached rows describe a block that no longer exists.
+    ROW_PREV=()
     return 0
 }
 
@@ -777,7 +781,11 @@ progress_monitor() {
     local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
     local rate_x10 pct done_kb=0 elapsed rate_kb eta
     local cols lines statusline maxrows shown slot row evline ev_idx ev_path
-    SLOT_IDX=() SLOT_PATH=()
+    local frame nrows i sizetick=0
+    SLOT_IDX=() SLOT_PATH=() ROW_PREV=() ROW_NEW=()
+    # Hidden for the whole display: otherwise the cursor is visibly walked up
+    # and down the block on every frame.
+    printf '%s' "$CURSOR_HIDE"
     while [ "$INTERRUPTED" -eq 0 ] && kill -0 "$xpid" 2>/dev/null; do
         if ! consume_new "$INFLIGHT" "$ioff"; then
             erase_block
@@ -845,10 +853,15 @@ progress_monitor() {
             done < "$MONBUF"
         fi
         elapsed=$((SECONDS-start))
-        # Re-read both every tick so a mid-run resize cannot leave a row that
-        # nothing is able to erase afterwards.
-        cols=$(term_cols)
-        lines=$(term_lines)
+        # Re-read periodically rather than every tick: two subprocesses per
+        # frame is real cost at this rate, and a resize only needs picking up
+        # promptly, not instantly. Anything stale here is corrected within a
+        # couple of seconds, well before it could strand a wrapped row.
+        if [ "$((sizetick % 8))" -eq 0 ]; then
+            cols=$(term_cols)
+            lines=$(term_lines)
+        fi
+        sizetick=$((sizetick+1))
 
         if [ "$BYTES_OK" -eq 1 ]; then
             # Throughput over the whole run so far, not an instantaneous
@@ -886,23 +899,64 @@ progress_monitor() {
         [ "$maxrows" -lt 1 ] && maxrows=1
         shown="$JOBS"
         [ "$shown" -gt "$maxrows" ] && shown="$maxrows"
-        block_home
+
+        # Compose the rows first, then emit the whole frame in ONE write, and
+        # only for rows whose text actually changed.
+        #
+        # Both halves matter. A printf per row lets the terminal draw a partial
+        # frame between them, which is what the eye reads as flicker; batching
+        # makes the update atomic. And rewriting a row that has not changed
+        # costs a repaint for nothing, so the worker rows, which change only
+        # when a file starts or finishes, stay untouched on most ticks while
+        # the summary row updates every tick.
+        frame=""
+        nrows=0
         slot=0
         while [ "$slot" -lt "$shown" ]; do
             row=$(printf '  [%2d] %s' "$((slot+1))" \
                 "$(fit_path "${SLOT_PATH[$slot]:-(idle)}" $((cols-8)))")
-            printf '%s\033[K\n' "${row:0:$((cols-1))}"
+            ROW_NEW[nrows]=${row:0:$((cols-1))}
+            nrows=$((nrows+1))
             slot=$((slot+1))
         done
         if [ "$JOBS" -gt "$shown" ]; then
-            printf '  +%d more worker slots\033[K\n' "$((JOBS-shown))"
-            BLOCK_H=$((shown+2))
-        else
-            BLOCK_H=$((shown+1))
+            ROW_NEW[nrows]="  +$((JOBS-shown)) more worker slots"
+            nrows=$((nrows+1))
         fi
-        printf '%s\033[K' "${statusline:0:$((cols-1))}"
+        ROW_NEW[nrows]=${statusline:0:$((cols-1))}
+        nrows=$((nrows+1))
+
+        if [ "$BLOCK_H" -ne "$nrows" ]; then
+            # Height changed, so the cached rows describe a different block and
+            # every line has to be laid down again.
+            erase_block
+            i=0
+            while [ "$i" -lt "$nrows" ]; do
+                frame="$frame${ROW_NEW[$i]}"$'\033'"[K"
+                [ "$((i+1))" -lt "$nrows" ] && frame="$frame"$'\n'
+                ROW_PREV[i]=${ROW_NEW[$i]}
+                i=$((i+1))
+            done
+            printf '%s' "$frame"
+            BLOCK_H=$nrows
+        else
+            # Walk down the existing block, redrawing only what differs. A row
+            # that is unchanged costs one cursor-down and no repaint.
+            frame=$'\r'$'\033'"[$((BLOCK_H-1))A"
+            [ "$BLOCK_H" -eq 1 ] && frame=$'\r'
+            i=0
+            while [ "$i" -lt "$nrows" ]; do
+                if [ "${ROW_PREV[$i]:-}" != "${ROW_NEW[$i]}" ]; then
+                    frame="$frame"$'\r'"${ROW_NEW[$i]}"$'\033'"[K"
+                    ROW_PREV[i]=${ROW_NEW[$i]}
+                fi
+                [ "$((i+1))" -lt "$nrows" ] && frame="$frame"$'\033'"[1B"
+                i=$((i+1))
+            done
+            printf '%s' "$frame"
+        fi
         spin=$((spin+1))
-        sleep 0.5
+        sleep 0.25
     done
     # Final drain for events that landed between the last poll and exit.
     # On a failed read the ordered replay picks everything up anyway.
@@ -925,6 +979,7 @@ progress_monitor() {
         done < "$MONBUF"
     fi
     erase_block
+    printf '%s' "$CURSOR_SHOW"
 }
 
 # Start the worker engine and set XPID. Split from the wait below, with the

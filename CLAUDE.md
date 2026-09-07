@@ -190,6 +190,12 @@ README option list still agree. They have drifted apart before.
   because a command substitution forks once per file; the common case is a
   pattern match and an assignment with no subprocess. `set_display_path` is
   exported alongside the other worker functions, since `hash_worker` calls it.
+- A live display has to be one write per frame, and has to skip rows that did
+  not change. A `printf` per row lets the terminal paint a partial frame, which
+  is what the eye reads as flicker, and rewriting an unchanged row costs a
+  repaint for nothing. Hide the cursor for the duration (`\033[?25l`) or it is
+  visibly walked up and down the block; restore it (`\033[?25h`) on every exit
+  path, the interrupt one included, or the terminal is left without a cursor.
 - `! -path "*/.*"` filters hidden entries out of results but does **not** stop
   `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
   walk starts at `.`, which a bare `.*` matches, pruning the entire tree.
@@ -202,9 +208,10 @@ README option list still agree. They have drifted apart before.
 
 ## Working the review
 
-Ask CodeRabbit to look again with `@coderabbitai resume`. `full review` is for
-recovering after a rate-limited attempt has marked commits as seen, not for
-routine re-review.
+CodeRabbit reviews every push on its own. Do not ask for anything after a
+normal push; just wait. `@coderabbitai resume` is for restarting it when
+reviews have been paused, and `full review` only for recovering after a
+rate-limited attempt has marked commits as seen.
 
 Findings are answered in the **commit message** that fixes them, or in the PR
 description when they change what the PR is. A PR comment says which commit

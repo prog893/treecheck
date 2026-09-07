@@ -163,6 +163,14 @@ total, elapsed time, throughput and an estimate of the time remaining.
  / 171/1949 42% 1.2TiB/2.9TiB 11m03s 340.5MiB/s eta 2h04m
 ```
 
+The block redraws four times a second, as one write per frame, repainting only
+the rows whose text changed: between verdicts that is the summary row alone,
+while the worker rows are left untouched. Drawing row by row lets the terminal
+show a half-updated frame, which reads as flicker, and repainting a row that
+has not changed costs a repaint for nothing. The cursor is hidden for the
+duration, since otherwise it is visibly walked up and down the block on every
+frame, and restored on exit including after an interrupt.
+
 A file holds its row until it finishes, so rows stay put instead of
 reshuffling every time a neighbour completes. A path too wide for the terminal
 keeps its tail, which is where the filename is, and is marked with a leading
