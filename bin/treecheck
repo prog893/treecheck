@@ -284,6 +284,18 @@ fmt_dur() {
     fi
 }
 
+# A sidecar's contents are untrusted input too. tr -d '[:space:]' removes
+# whitespace but leaves every other control byte in place, and a digest was
+# rendered straight into the mismatch detail lines. Anything that is not a
+# 64-character hex digest is not a digest, so it is refused rather than
+# compared, and its bytes never reach the terminal.
+is_sha256() {
+    case "$1" in
+        *[!0-9a-fA-F]*) return 1 ;;
+    esac
+    [ "${#1}" -eq 64 ]
+}
+
 # A filename is untrusted input: it can hold ESC and friends, and a verdict
 # line carrying those straight to a terminal lets the name rewrite the report
 # about itself. Hiding its own "Mismatched" line is exactly the outcome this
@@ -404,6 +416,10 @@ verify_file_hash() {
         printf 'missing\nsidecar is empty\n'
         return 2
     }
+    if ! is_sha256 "$stored_hash"; then
+        printf 'missing\nsidecar does not hold a SHA-256 digest\n'
+        return 2
+    fi
 
     current_hash=$(compute_hash "$file")
     if [ -z "$current_hash" ]; then
@@ -435,6 +451,10 @@ create_file_hash() {
         if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
             printf 'io-error\nsidecar could not be read\n'
             return 3
+        fi
+        if [ -n "$stored_hash" ] && ! is_sha256 "$stored_hash"; then
+            printf 'missing\nsidecar does not hold a SHA-256 digest\n'
+            return 2
         fi
         if [ -n "$stored_hash" ]; then
             # Verify existing hash unless NO_VERIFY is set
@@ -491,7 +511,11 @@ create_file_hash() {
         # a read-back verdict that never happened.
         # stderr redirected before the target so a failed redirect cannot
         # leak the shell's own diagnostic past the suppression.
-        if ! printf '%s\n' "$file" 2>/dev/null >> "$CREATED_LOG"; then
+        # One fixed byte per creation, not the pathname. The log exists only
+        # to be counted with wc -l, and the sequential engine accepts paths
+        # containing newlines, each of which would otherwise add a line and
+        # inflate Created.
+        if ! printf '\n' 2>/dev/null >> "$CREATED_LOG"; then
             printf 'created\ncreation event could not be recorded\n'
             return 6
         fi
@@ -509,6 +533,10 @@ create_file_hash() {
         local stored_hash
         if ! stored_hash=$(tr -d '[:space:]' < "$hash_file" 2>/dev/null); then
             printf 'io-error\nsidecar written but could not be read back\n'
+            return 3
+        fi
+        if ! is_sha256 "$stored_hash"; then
+            printf 'io-error\nsidecar read back as something other than a digest\n'
             return 3
         fi
         if [ "$stored_hash" = "$current_hash" ]; then
@@ -1037,6 +1065,18 @@ await_workers() {
             [ "$drain" -eq 20 ] && { kill -KILL -"$XPID" 2>/dev/null || true; }
             [ "$drain" -ge 40 ] && break
         done
+        # Reaping xargs is not the same as the work being over: it can exit
+        # while a worker it started is still running, and that worker is what
+        # writes into the results directory cleanup is about to remove. The
+        # group outlives xargs for as long as any member does, so the group is
+        # what has to be waited on. wait cannot see grandchildren, so poll.
+        drain=0
+        while kill -0 -- "-$XPID" 2>/dev/null; do
+            drain=$((drain+1))
+            [ "$drain" -eq 40 ] && { kill -KILL -- "-$XPID" 2>/dev/null || true; }
+            [ "$drain" -ge 80 ] && break
+            sleep 0.05
+        done
     fi
     XPID=""
     if [ "$xrc" -ne 0 ] && [ "$INTERRUPTED" -eq 0 ]; then
@@ -1079,7 +1119,7 @@ parallel_process_files() {
     fi
     export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG ESC_NL
     export VERDICT_W
-    export -f hash_worker verify_file_hash create_file_hash compute_hash set_display_path print_verdict
+    export -f hash_worker verify_file_hash create_file_hash compute_hash set_display_path print_verdict is_sha256
 
     echo "Hashing with $JOBS parallel workers..."
 

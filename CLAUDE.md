@@ -87,6 +87,7 @@ fixture holding **all** outcome categories at once:
 | Ctrl-C during a `-j 1` run | no further file is hashed after the signal, exit 130 |
 | a **direct** `SIGTERM` to a `-j > 1` run (`kill <pid>`, not the group) | no worker survives the exit, exit 130 |
 | a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
+| a sidecar holding anything but a 64-character hex digest | `Missing/empty`, exit 2, and none of its bytes reach the terminal |
 | every verdict line | an outcome token in a fixed column, then the path, with any detail indented beneath. Tokens: `ok`, `created`, `MISMATCH`, `missing`, `io-error`, `skipped` |
 | `Created` on a fresh tree | identical under `-j 1` and `-j > 1`. Both count from the creation log, because the sequential engine reads each verdict through a command substitution and a counter incremented in that subshell never comes back |
 
@@ -180,6 +181,18 @@ README option list still agree. They have drifted apart before.
 - Print a filename with `printf '%s'`, never `echo`. Under `xpg_echo` bash's
   `echo` expands backslash escapes in its argument, so a name holding a literal
   backslash-n reaches the terminal as a line break and splits a verdict in two.
+- A sidecar's contents are untrusted input as much as a filename is.
+  `tr -d '[:space:]'` strips whitespace and nothing else, so a `.sha256` file
+  can carry `ESC` into a mismatch detail line. Anything that is not a
+  64-character hex digest is not a digest: refuse it as an unusable sidecar
+  rather than comparing it, and never render its bytes.
+- Reaping `xargs` is not the same as the work being finished. It can exit while
+  a worker it started is still running, and `wait` cannot see grandchildren, so
+  the process group has to be polled with `kill -0 -- "-$XPID"` before anything
+  is cleaned up.
+- The creation log is counted with `wc -l`, so it must hold one fixed byte per
+  creation. Writing the pathname there adds a line per newline in the name,
+  which the sequential engine accepts, and inflates `Created`.
 - A filename is untrusted input. Printing one straight to a terminal lets it
   carry `ESC` and rewrite the report about itself, and a name that erases its
   own `Mismatched` line is precisely the silent failure this tool exists to

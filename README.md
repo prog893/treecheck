@@ -84,7 +84,7 @@ Each outcome is counted separately, because they mean very different things:
 |---|---|
 | **Verified** | The file still hashes to what was recorded |
 | **Mismatched** | The contents changed. This is the number that matters |
-| **Missing/empty** | No usable sidecar, either absent or empty. Run with `-c` to record one |
+| **Missing/empty** | No usable sidecar: absent, empty, or not holding a SHA-256 digest. Run with `-c` to record one |
 | **Not verified** | Create mode with `-n`: a sidecar was written but never read back |
 | **I/O errors** | The file or its sidecar could not be read, or the sidecar could not be written |
 
