@@ -89,11 +89,11 @@ Each outcome is counted separately, because they mean very different things:
 | **I/O errors** | The file or its sidecar could not be read, or the sidecar could not be written |
 
 For a sidecar that already existed, `Verified` means the file was read and
-hashed and the result matched. For one this run just created, it means the
-sidecar was read back and matched the digest written to it, which is what the
-per-file line reports as `created, sidecar verified`. Creation hashes the file
-once; a sidecar recorded for a file that is being written to concurrently can
-still go stale, the same as one recorded a moment before the write.
+hashed and the result matched, and the per-file line reads `ok`. For one this
+run just created, it means the sidecar was read back and matched the digest
+written to it, and the line reads `created`. Creation hashes the file once; a
+sidecar recorded for a file that is being written to concurrently can still go
+stale, the same as one recorded a moment before the write.
 
 `Mismatched` and `I/O errors` are deliberately distinct. A mismatch means the bytes changed. An I/O error means the drive would not hand them over, which points at the hardware rather than at the data.
 
@@ -237,15 +237,15 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 - `shasum` (standard on macOS and Linux)
 - `find` with `-print0` support
 - standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`
-- `sort` accepting `-z`, for the ordered walk only; without it the walk keeps
-  filesystem order and says so, and nothing else changes
+- `sort` accepting `-z`, and `mv`, for the ordered walk only; without `sort -z`
+  the walk keeps filesystem order and says so, and nothing else changes
 
 Parallel hashing (the default on multi-core machines) additionally uses an
 `xargs` built with `-P`. That flag is common but not POSIX; where it is
 missing the tool says so up front and `-j 1` always works with the core set
 alone - an explicit serial run needs nothing from this tier. The live
 progress display runs only when stdout is a terminal and additionally uses
-`tail`, `head`, `awk`, `grep`, `mv`, `sleep`, `tput` and `du`. `grep` belongs
+`tail`, `head`, `awk`, `grep`, `sleep`, `stty`, `tput` and `du`. `grep` belongs
 to this tier alone. `du` supplies the byte weights behind the percentage and
 the estimate; without it the display counts files instead and drops the
 estimate.

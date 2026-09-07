@@ -772,17 +772,6 @@ fit_path() {
 # up interleaved with the verdicts scrolling past it.
 BLOCK_H=0
 
-# Put the cursor back on the block's first row WITHOUT clearing anything, so a
-# redraw overwrites in place. Clearing first and drawing after leaves the block
-# blank for the gap between the two, which at two ticks a second reads as a
-# flicker.
-block_home() {
-    [ "$BLOCK_H" -gt 0 ] || return 0
-    printf '\r'
-    [ "$BLOCK_H" -gt 1 ] && printf '\033[%dA' "$((BLOCK_H-1))"
-    return 0
-}
-
 CURSOR_HIDE=$'\033[?25l'
 CURSOR_SHOW=$'\033[?25h'
 erase_block() {

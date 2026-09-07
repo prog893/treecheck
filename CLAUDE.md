@@ -6,7 +6,8 @@ dependency tiers:
 - Core (every run): `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`,
   `mktemp`, `wc`.
 - Ordered walk (optional, every run that can have it): a `sort` accepting
-  `-z` for NUL-separated records, which is not POSIX. It is probed once at
+  `-z` for NUL-separated records, plus `mv` to swap the sorted list into place.
+  `sort -z` is not POSIX. It is probed once at
   startup. Without it the walk keeps filesystem order and the run says so on
   stderr; nothing else changes, and no verification result depends on it.
   Sorting is a diffability property, not a correctness one, and it describes
@@ -18,10 +19,10 @@ dependency tiers:
   failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
   a fallback to 1. An explicit `-j 1` needs nothing from this tier.
 - Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
-  `grep`, `mv`, `sleep`, `du`, `tput`. Never used for piped output. `tput cols`
-  keeps the status line inside one terminal row; a failure falls back to 80
-  columns, which is best effort rather than a guarantee, since a terminal
-  narrower than 80 columns will still wrap and strand a row.
+  `grep`, `sleep`, `du`, `stty`, `tput`. Never used for piped output. The
+  geometry comes from `stty size` on `/dev/tty`, falling back to `tput`, then
+  to 80 columns; that last is best effort rather than a guarantee, since a
+  terminal narrower than 80 columns will still wrap and strand a row.
 
 Sizes for the progress display come from `du -k`, not `stat`: `du -k` is
 spelled identically on BSD and GNU where `stat` needs `-f%z` on one and
