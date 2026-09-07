@@ -190,6 +190,10 @@ README option list still agree. They have drifted apart before.
   a worker it started is still running, and `wait` cannot see grandchildren, so
   the process group has to be polled with `kill -0 -- "-$XPID"` before anything
   is cleaned up.
+- Never name a temp file by appending a suffix to another temp file's name.
+  `"$FILE_LIST.sorted"` is derivable from `$FILE_LIST`, so another process can
+  create it first and have the redirection write through its symlink; a second
+  `mktemp` costs nothing. There are no derived temp names left in the script.
 - The creation log is counted with `wc -l`, so it must hold one fixed byte per
   creation. Writing the pathname there adds a line per newline in the name,
   which the sequential engine accepts, and inflates `Created`.

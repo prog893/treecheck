@@ -104,6 +104,7 @@ validate_jobs() {
 }
 
 FILE_LIST="" FIND_ERR="" RESULTS_DIR="" WORK_INPUT="" STREAMED=0
+SORTED_LIST="" ALL_LIST=""
 
 # Every path this script deletes comes from mktemp, and nothing else is ever
 # eligible. That invariant used to be implicit: it held only because each
@@ -173,16 +174,15 @@ cleanup_tmp() {
     # Erase the status line on the way out. Ctrl-C during a long run otherwise
     # leaves a half-drawn bar sitting above the next shell prompt.
     [ "$STREAMED" -eq 1 ] && [ -t 1 ] && printf '\r\033[K\033[?25h'
-    # The derived names use ${VAR:+...} so that an unset base contributes
-    # nothing at all. Spelled "${VAR:-}.sorted" they would collapse to the
-    # bare suffix ".sorted" whenever the base was unset, which the guard then
-    # correctly refused and reported, on every run that exits before the walk
-    # starts (treecheck -h among them).
-    remove_tmp "$FILE_LIST" "${FILE_LIST:+$FILE_LIST.sorted}" \
-               "$FIND_ERR" "${FIND_ERR:+$FIND_ERR.all}" \
+    # Every one of these came from mktemp. Nothing here is a name derived by
+    # appending a suffix to another temp file: such a sibling is predictable
+    # from the original, which makes it something another process can create
+    # first, and it is no harder to allocate a second mktemp instead.
+    remove_tmp "$FILE_LIST" "${SORTED_LIST:-}" \
+               "$FIND_ERR" "${ALL_LIST:-}" \
                "${ORDERED_PATHS:-}" "$WORK_INPUT" \
                "${CREATED_LOG:-}" "${INFLIGHT:-}" "${DONE_LOG:-}" \
-               "${MONBUF:-}" "${ACTIVE:-}" "${ACTIVE:+$ACTIVE.new}" \
+               "${MONBUF:-}" \
                "${STREAMED_LOG:-}" "${NEEDS_PRINT:-}" "${ALL_IDX:-}"
     remove_tmp_dir "$RESULTS_DIR"
     return 0
@@ -1105,13 +1105,12 @@ parallel_process_files() {
 
     WORKER_MODE="$mode"
     STREAMED=0
-    INFLIGHT="" DONE_LOG="" MONBUF="" ACTIVE="" STREAMED_LOG="" NEEDS_PRINT="" ALL_IDX=""
+    INFLIGHT="" DONE_LOG="" MONBUF="" STREAMED_LOG="" NEEDS_PRINT="" ALL_IDX=""
     STREAMED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     if [ -t 1 ]; then
         INFLIGHT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         DONE_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         MONBUF=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
-        ACTIVE=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         NEEDS_PRINT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         ALL_IDX=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         ORDERED_PATHS=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
@@ -1387,11 +1386,13 @@ if [ $VERBOSE -eq 1 ]; then
     # Same cd-then-"find ." form as the real walk: with an absolute path the
     # starting point itself would match ".?*" whenever the target is hidden
     # (treecheck ~/.config), pruning the entire tree and counting nothing.
-    ( cd "$TARGET_DIR" && find . ${MAXDEPTH:+-maxdepth "$MAXDEPTH"} -name '.?*' -prune -o -type f -print0 ) > "$FIND_ERR.all" 2>/dev/null || true
+    ALL_LIST=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
+    ( cd "$TARGET_DIR" && find . ${MAXDEPTH:+-maxdepth "$MAXDEPTH"} -name '.?*' -prune -o -type f -print0 ) > "$ALL_LIST" 2>/dev/null || true
     while IFS= read -r -d '' file; do
         all_files=$((all_files+1))
-    done < "$FIND_ERR.all"
-    remove_tmp "$FIND_ERR.all"
+    done < "$ALL_LIST"
+    remove_tmp "$ALL_LIST"
+    ALL_LIST=""
 fi
 
 # Run the walk to a file first so that its exit status survives. Inside a
@@ -1413,11 +1414,14 @@ fi
 # LC_ALL=C so the order is the same everywhere rather than depending on the
 # caller's collation. Both engines read this file, so they stay in step.
 if [ "$SORT_NUL" -eq 1 ]; then
-    if LC_ALL=C sort -z "$FILE_LIST" > "$FILE_LIST.sorted" 2>/dev/null &&
-       mv "$FILE_LIST.sorted" "$FILE_LIST"; then
-        :
+    SORTED_LIST=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || SORTED_LIST=""
+    if [ -n "$SORTED_LIST" ] &&
+       LC_ALL=C sort -z "$FILE_LIST" > "$SORTED_LIST" 2>/dev/null &&
+       mv "$SORTED_LIST" "$FILE_LIST"; then
+        SORTED_LIST=""
     else
-        remove_tmp "$FILE_LIST.sorted"
+        remove_tmp "${SORTED_LIST:-}"
+        SORTED_LIST=""
         error "could not sort the walk; continuing in filesystem order"
     fi
 fi
