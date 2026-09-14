@@ -36,6 +36,46 @@ all thirteen are channels and struct fields:
 `is_our_tmp`, the `E2BIG` batching in `remove_tmp_dir`, and the rule against
 deriving one temp name from another all go with them.
 
+## Views
+
+Two, switched with `tab` at runtime, or started in the dashboard with `--dash`.
+
+The **log view** is the default and scrolls verdicts past a pinned status block,
+using a DECSTBM scrolling region so the block is never erased. The verdict
+stream is the product of this tool, and this view keeps it in the terminal's
+scrollback.
+
+The **dashboard** is a full-screen, multi-pane view for watching a long run:
+the verdict stream and a statistics pane side by side, a per-worker band with
+progress within each file, and a run-total bar. It draws into the alternate
+screen buffer, which the terminal discards on exit, so everything it showed is
+replayed to the restored screen when you leave it. Beyond 50,000 lines the
+replay is dropped and says so, since a run that large wants a pipe.
+
+```
+┌─ treecheck · /Volumes/Media · Verify only · 6 workers ─┬─────────────────────────────────────┐
+│                                                        │ verified                        168 │
+│                                                        │ mismatched                1 corrupt │
+│                                                        │ missing                           2 │
+│                                                        │ io errors                         0 │
+│                                                        │ files                    171 / 1949 │
+│ ok       /Volumes/Media/A008_07091214_C068.braw        │ data                1.1TiB / 2.8TiB │
+│ MISMATCH /Volumes/Media/A008_07091214_C070.braw        │ eta                           2h04m │
+│          recorded 8516299eda3b1cf414041e1e695c9338692de│ throughput               340.5MiB/s │
+│ ok       /Volumes/Media/B002_0709_C002.mov             │                      ▃▄▅▇▆▇█▇▅▂▃▆▇▇ │
+├─ workers ──────────────────────────────────────────────┴─────────────────────────────────────┤
+│  1 ██████▏···  61%  /Volumes/Media/A008_07091214_C071.braw                         2.1GiB    │
+│  2 ██▏·······  21%  /Volumes/Media/A008_07091214_C072.braw                         4.7GiB    │
+├──────────────────────────────────────────────────────────────────────────────────────────────┤
+│ █████████████████████▎······················· 48%  [tab] log  [space] detail  [q] quit       │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Layout is tested rather than eyeballed: `TestDashboardGeometry` renders every
+pane combination at eight terminal sizes and asserts no row exceeds the screen
+width and no frame exceeds its height, because a row one cell too wide wraps and
+shifts every row below it.
+
 ## The test suite owns the contract
 
 `go test ./...` is the primary suite. It does not consult the shell version:

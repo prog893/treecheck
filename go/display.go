@@ -40,16 +40,143 @@ type Display struct {
 
 	start    time.Time
 	expanded atomic.Bool
+	view     atomic.Int32
 	stop     chan struct{}
 	wg       sync.WaitGroup
+	screen   *Screen
+
+	// Descriptive fields for the dashboard header, fixed for the run.
+	root string
+	mode string
+
+	// Guarded by mu: the recent-verdict ring and the throughput history.
+	recent   []string
+	rateHist []int64
+	lastB    int64
+	lastT    time.Time
+
+	// Verdicts emitted while the dashboard was up. The alternate screen is
+	// discarded on exit, so they are replayed to the restored screen rather
+	// than lost: the verdict stream is the product of this tool, and a view
+	// you switched into for a closer look must not cost you the log.
+	held    []string
+	heldCap bool
 
 	// rate is smoothed over the whole run rather than sampled per tick: an
 	// instantaneous rate on a mix of huge and tiny files swings hard enough
-	// to make the remaining estimate useless.
+	// to make the remaining estimate useless. The sparkline is the opposite:
+	// it wants the per-second variation, which is what shows a device
+	// stalling, so it keeps its own short history.
 	mu sync.Mutex
 }
 
-func NewDisplay(r *Renderer, c *colors, jobs, total int, totalBytes int64) *Display {
+// View selects between the scrolling log and the full-screen dashboard.
+const (
+	viewLog int32 = iota
+	viewDash
+)
+
+// heldLineCap bounds the replay buffer. A run large enough to exceed it is one
+// whose verdicts belong in a pipe, so the overflow is reported rather than
+// silently dropped.
+const heldLineCap = 50000
+
+// recentCap is the ring the dashboard's stream pane draws from.
+const recentCap = 200
+
+// statsSnapshot is one consistent read of everything the panes display. Taking
+// it once per frame stops a frame showing a file count from after a completion
+// beside a byte count from before it.
+type statsSnapshot struct {
+	doneFiles, doneBytes         int64
+	ok, mismatch, missing, ioerr int64
+	inflight                     int64
+	rate                         int64
+	elapsed                      int64
+	frac                         float64
+	eta                          string
+	hist                         []int64
+}
+
+func (d *Display) snapshot() statsSnapshot {
+	var st statsSnapshot
+	st.doneFiles = d.doneFiles.Load()
+	st.doneBytes = d.doneBytes.Load()
+	st.ok = d.nOK.Load()
+	st.mismatch = d.nMismatch.Load()
+	st.missing = d.nMissing.Load()
+	st.ioerr = d.nIOErr.Load()
+	for _, s := range d.slots {
+		if s.active.Load() {
+			st.inflight += s.done.Load()
+		}
+	}
+	elapsed := time.Since(d.start)
+	st.elapsed = int64(elapsed.Seconds())
+
+	// In-flight bytes count toward progress. Without them a single very large
+	// file leaves the bar frozen for minutes while real work is happening.
+	seen := st.doneBytes + st.inflight
+	switch {
+	case d.totalBytes > 0:
+		st.frac = float64(seen) / float64(d.totalBytes)
+	case d.total > 0:
+		st.frac = float64(st.doneFiles) / float64(d.total)
+	}
+	// Clamped, because the sizes are a weighting heuristic rather than a
+	// measurement: a file that grew between the walk and the hash makes the
+	// in-flight sum overshoot the total, and a bar reading 270% is worse
+	// than one that sits at full while the last file finishes.
+	if st.frac > 1 {
+		st.frac = 1
+	}
+	if st.frac < 0 {
+		st.frac = 0
+	}
+	if elapsed > 0 {
+		st.rate = int64(float64(seen) / elapsed.Seconds())
+	}
+	st.eta = "--"
+	if st.rate > 0 && d.totalBytes > 0 {
+		if remain := d.totalBytes - seen; remain > 0 {
+			st.eta = fmtDur(remain / st.rate)
+		} else {
+			st.eta = "0s"
+		}
+	}
+	d.mu.Lock()
+	st.hist = append([]int64(nil), d.rateHist...)
+	d.mu.Unlock()
+	return st
+}
+
+// sampleRate records one point of instantaneous throughput for the sparkline.
+func (d *Display) sampleRate() {
+	now := time.Now()
+	seen := d.doneBytes.Load()
+	for _, s := range d.slots {
+		if s.active.Load() {
+			seen += s.done.Load()
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastT.IsZero() {
+		d.lastT, d.lastB = now, seen
+		return
+	}
+	dt := now.Sub(d.lastT).Seconds()
+	if dt < 0.5 {
+		return
+	}
+	d.rateHist = append(d.rateHist, int64(float64(seen-d.lastB)/dt))
+	if len(d.rateHist) > 240 {
+		d.rateHist = d.rateHist[len(d.rateHist)-240:]
+	}
+	d.lastT, d.lastB = now, seen
+}
+
+func NewDisplay(r *Renderer, c *colors, jobs, total int, totalBytes int64, root, mode string) *Display {
 	d := &Display{
 		r:          r,
 		c:          c,
@@ -58,6 +185,8 @@ func NewDisplay(r *Renderer, c *colors, jobs, total int, totalBytes int64) *Disp
 		totalBytes: totalBytes,
 		start:      time.Now(),
 		stop:       make(chan struct{}),
+		root:       root,
+		mode:       mode,
 	}
 	for i := range d.slots {
 		s := &slot{}
@@ -115,7 +244,11 @@ func (d *Display) Run() {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		d.r.Start(d.footerHeight(), func() { d.r.SetFooter(d.frame()) })
+		// Only the log view owns a scrolling region. Starting one while the
+		// dashboard is up would scroll the primary screen behind it.
+		if d.view.Load() == viewLog {
+			d.r.Start(d.footerHeight(), d.repaint)
+		}
 		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
 		for {
@@ -123,24 +256,111 @@ func (d *Display) Run() {
 			case <-d.stop:
 				return
 			case <-t.C:
-				d.r.SetFooter(d.frame())
+				d.sampleRate()
+				d.repaint()
 			}
 		}
 	}()
 }
 
+// repaint draws whichever view is current. The two are mutually exclusive
+// owners of the terminal: the log view holds a scrolling region with a pinned
+// footer, the dashboard holds the alternate buffer, and switching hands the
+// terminal from one to the other rather than layering them.
+func (d *Display) repaint() {
+	if d.view.Load() == viewDash {
+		rows, cols := d.r.Size()
+		d.mu.Lock()
+		sc := d.screen
+		fresh := sc == nil
+		if fresh {
+			sc = NewScreen(d.r.out, rows, cols)
+			d.screen = sc
+		}
+		d.mu.Unlock()
+		// Claiming the alternate buffer is what makes the screen drawable;
+		// Draw is a no-op until then. Enter is idempotent, so a repaint
+		// after a view switch re-enters rather than needing its own path.
+		sc.Enter()
+		if !fresh {
+			sc.Resize(rows, cols)
+		}
+		sc.Draw(d.renderDashboard(rows, cols))
+		return
+	}
+	d.r.SetFooter(d.frame())
+}
+
 func (d *Display) Close() {
 	close(d.stop)
 	d.wg.Wait()
+	d.leaveDash()
 	d.r.Stop()
 }
 
-// Commit prints finished verdicts above the pinned footer.
-func (d *Display) Commit(lines []string) { d.r.Commit(lines) }
+// Commit prints finished verdicts. In the log view they scroll past above the
+// pinned footer. In the dashboard they feed the stream pane and are held for
+// replay, because the alternate buffer is discarded on exit.
+func (d *Display) Commit(lines []string) {
+	d.mu.Lock()
+	for _, l := range lines {
+		d.recent = append(d.recent, l)
+	}
+	if len(d.recent) > recentCap {
+		d.recent = d.recent[len(d.recent)-recentCap:]
+	}
+	dash := d.view.Load() == viewDash
+	if dash {
+		if len(d.held)+len(lines) > heldLineCap {
+			d.heldCap = true
+		} else {
+			d.held = append(d.held, lines...)
+		}
+	}
+	d.mu.Unlock()
+	if !dash {
+		d.r.Commit(lines)
+	}
+}
 
 func (d *Display) ToggleExpanded() {
 	d.expanded.Store(!d.expanded.Load())
-	d.r.SetFooter(d.frame())
+	d.repaint()
+}
+
+// ToggleView hands the terminal between the two views.
+func (d *Display) ToggleView() {
+	if d.view.Load() == viewDash {
+		d.leaveDash()
+		d.view.Store(viewLog)
+		d.r.Start(d.footerHeight(), d.repaint)
+	} else {
+		d.r.Stop()
+		d.view.Store(viewDash)
+	}
+	d.repaint()
+}
+
+// leaveDash restores the primary screen and replays everything the dashboard
+// showed, so switching views never costs the verdict log.
+func (d *Display) leaveDash() {
+	d.mu.Lock()
+	sc := d.screen
+	held := d.held
+	capped := d.heldCap
+	d.held = nil
+	d.heldCap = false
+	d.mu.Unlock()
+	if sc == nil {
+		return
+	}
+	sc.Leave()
+	if capped {
+		fmt.Fprintf(d.r.out, "... earlier verdicts were not held; pipe the output to keep a full log\n")
+	}
+	for _, l := range held {
+		fmt.Fprintln(d.r.out, l)
+	}
 }
 
 // bar renders a proportional bar in block characters. Eighth-blocks give the

@@ -42,9 +42,9 @@ func ioctlTermios(fd uintptr, req uintptr, t *syscall.Termios) error {
 }
 
 // watchKeys reads the controlling terminal directly rather than stdin, which
-// may be a pipe, and never touches the hashing path: a key can only toggle the
+// may be a pipe, and never touches the hashing path: a key can only switch the
 // view or ask the scan to stop.
-func watchKeys(ctx context.Context, d *Display, cancel context.CancelFunc) {
+func watchKeys(ctx context.Context, d *Display, stop func()) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
 	if err != nil {
 		return
@@ -69,10 +69,13 @@ func watchKeys(ctx context.Context, d *Display, cancel context.CancelFunc) {
 			return
 		}
 		switch buf[0] {
+		case '\t':
+			d.ToggleView()
 		case ' ':
 			d.ToggleExpanded()
 		case 'q', 'Q':
-			cancel()
+			// The same path a signal takes: the run is stopped, not failed.
+			stop()
 			return
 		}
 		select {

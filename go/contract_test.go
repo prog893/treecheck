@@ -256,3 +256,28 @@ func TestNewlineInPathIsHandled(t *testing.T) {
 		t.Errorf("verify after create: exit = %d, want 0", r.code)
 	}
 }
+
+// TestStoppingIsNotFailing pins the distinction that pressing q got wrong: a
+// run the operator stopped reports 130 and says so, while a run that lost
+// records with nothing to account for them is a fault in this tool and reports
+// 1. Both checked less than they claimed, and neither may report clean.
+func TestStoppingIsNotFailing(t *testing.T) {
+	stopped := &Counters{Scanned: 5, OK: 5, Unreached: 20}
+	if got := stopped.ExitCode(false, true, false, false); got != 130 {
+		t.Errorf("a stopped run exits %d, want 130", got)
+	}
+	lost := &Counters{Scanned: 5, OK: 5, Unreached: 20}
+	if got := lost.ExitCode(false, false, false, false); got != 1 {
+		t.Errorf("records lost with no stop to explain them exits %d, want 1", got)
+	}
+	clean := &Counters{Scanned: 25, OK: 25}
+	if got := clean.ExitCode(false, false, false, false); got != 0 {
+		t.Errorf("a complete clean run exits %d, want 0", got)
+	}
+	// A run that finished before the stop arrived is complete, and must not be
+	// downgraded by a flag that was set after the last record came back.
+	raced := &Counters{Scanned: 25, OK: 25}
+	if got := raced.ExitCode(false, true, false, false); got != 130 {
+		t.Errorf("stop observed exits %d, want 130", got)
+	}
+}

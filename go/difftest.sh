@@ -11,10 +11,13 @@ PASS=0; FAIL=0
 #   workers  a parallel-only banner line
 #   KEYS     the Go build adds interactive key bindings the shell one has no
 #            way to offer; the block is new help text, not changed behavior
+#   --dash   likewise: a view the shell build cannot render, so its help line
+#            has no counterpart to differ from
 #   colors   stripped so a tty and a pipe compare equal
 norm() { sed -e 's/^Elapsed:.*/Elapsed: X/' \
              -e '/parallel workers\.\.\./d' \
              -e '/^KEYS (interactive runs):/,/^$/d' \
+             -e '/^  --dash /d' \
              -e 's/\x1b\[[0-9;]*m//g'; }
 
 mkfixture() {

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -33,6 +34,7 @@ type options struct {
 	jobs     int
 	maxDepth int
 	exclude  []string
+	dash     bool
 }
 
 func usage(w *os.File) {
@@ -52,6 +54,7 @@ OPTIONS:
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
   --strict        Treat missing sidecars as a failure too
+  --dash          Start in the full-screen dashboard
   -V, --version   Print version and exit
   -h              Show this help
 
@@ -62,6 +65,7 @@ EXIT STATUS:
   130 interrupted: only the files reported as scanned were checked
 
 KEYS (interactive runs):
+  tab             Switch between the scrolling log and the dashboard
   space           Toggle the per-worker detail block
   q               Stop the scan
 
@@ -105,6 +109,8 @@ func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 			return nil, 0
 		case a == "--strict":
 			o.strict = true
+		case a == "--dash":
+			o.dash = true
 		case a == "--no-recurse":
 			o.maxDepth = 1
 		case a == "--max-depth":
@@ -258,27 +264,35 @@ func run(argv []string, stdout, stderr *os.File) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Signals are handled by cancelling a context the workers observe, so an
-	// interrupt stops the scan rather than merely being remembered by it. The
-	// shell implementation could not do this reliably: a trap firing inside a
-	// command substitution runs in that subshell and its assignment is lost.
+	// Stopping early is one concept with two triggers: a signal, and the quit
+	// key. Both mark the run interrupted and cancel the context the workers
+	// observe, so the scan actually stops rather than merely remembering that
+	// it was asked to. Keeping them separate is how pressing q came to report
+	// "Completed with errors": the run had not failed, it had been stopped.
+	//
+	// The flag is read by the parent that observes the result, never by a
+	// handler that might be running somewhere its writes are discarded.
+	var interrupted atomic.Bool
+	stop := func() {
+		interrupted.Store(true)
+		cancel()
+	}
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-	var sawSignal bool
-	var sigMu sync.Mutex
 	go func() {
-		<-sigc
-		sigMu.Lock()
-		sawSignal = true
-		sigMu.Unlock()
-		cancel()
+		if _, ok := <-sigc; ok {
+			stop()
+		}
 	}()
 
 	var disp *Display
 	if tty && !o.quiet && len(w.Files) > 0 {
-		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes)
+		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes, o.dir, mode)
+		if o.dash {
+			disp.view.Store(viewDash)
+		}
 		disp.Run()
-		go watchKeys(ctx, disp, cancel)
+		go watchKeys(ctx, disp, stop)
 	}
 
 	if o.jobs > 1 && !o.quiet {
@@ -349,14 +363,11 @@ func run(argv []string, stdout, stderr *os.File) int {
 		disp.Close()
 	}
 	signal.Stop(sigc)
-	sigMu.Lock()
-	wasInterrupted := sawSignal
-	sigMu.Unlock()
 
 	fmt.Fprintln(stdout)
 	counts.Write(stdout, c, o.create, int64(time.Since(start).Seconds()))
 
-	rc := counts.ExitCode(w.Err != nil, wasInterrupted, o.strict, o.create)
+	rc := counts.ExitCode(w.Err != nil, interrupted.Load(), o.strict, o.create)
 	switch rc {
 	case 0:
 		fmt.Fprintln(stdout, c.green("✓ Completed successfully"))
