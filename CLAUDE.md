@@ -22,7 +22,9 @@ dependency tiers:
   `grep`, `sleep`, `du`, `stty`, `tput`. Never used for piped output. The
   geometry comes from `stty size` on `/dev/tty`, falling back to `tput`, then
   to 80 columns; that last is best effort rather than a guarantee, since a
-  terminal narrower than 80 columns will still wrap and strand a row.
+  terminal narrower than 80 columns will still wrap and strand a row. Only the
+  width is consulted: the display is a single line, so the terminal's height
+  never enters into it.
 
 Sizes for the progress display come from `du -k`, not `stat`: `du -k` is
 spelled identically on BSD and GNU where `stat` needs `-f%z` on one and
@@ -90,6 +92,7 @@ fixture holding **all** outcome categories at once:
 | a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
 | a sidecar holding anything but a 64-character hex digest | `Missing/empty`, exit 2, and none of its bytes reach the terminal |
 | every verdict line | an outcome token in a fixed column, then the path, with any detail indented beneath. Tokens: `ok`, `created`, `MISMATCH`, `missing`, `io-error`, `skipped` |
+| the live status line (`-t 1`) | one row, no cursor-up sequence anywhere in the stream. Capture a run through a pty and assert `ESC[1A` never appears |
 | `Created` on a fresh tree | identical under `-j 1` and `-j > 1`. Both count from the creation log, because the sequential engine reads each verdict through a command substitution and a counter incremented in that subshell never comes back |
 
 Normalize the `Elapsed:` line before diffing the two engines; it is wall
@@ -208,12 +211,24 @@ README option list still agree. They have drifted apart before.
   because a command substitution forks once per file; the common case is a
   pattern match and an assignment with no subprocess. `set_display_path` is
   exported alongside the other worker functions, since `hash_worker` calls it.
-- A live display has to be one write per frame, and has to skip rows that did
-  not change. A `printf` per row lets the terminal paint a partial frame, which
-  is what the eye reads as flicker, and rewriting an unchanged row costs a
-  repaint for nothing. Hide the cursor for the duration (`\033[?25l`) or it is
-  visibly walked up and down the block; restore it (`\033[?25h`) on every exit
-  path, the interrupt one included, or the terminal is left without a cursor.
+- A live display has to be one write per frame. A `printf` per line lets the
+  terminal paint a partial frame, which is what the eye reads as flicker, so a
+  tick accumulates every verdict it is emitting plus the redrawn status line
+  into one string and writes that once. A tick with no verdict and no change to
+  the status text writes nothing at all.
+- **The status display is one line, and that is a correctness property of the
+  redraw, not a layout preference.** A single row is erased by `\r\033[K`, in
+  the same write as whatever replaces it. A multi-row block cannot be: it has to
+  be torn down by walking the cursor up through it, one write per row, and laid
+  back out afterwards, and because every verdict forces that teardown the
+  per-row diffing never gets to apply. A per-worker row naming the file in
+  flight is what made the block multi-row, and it cost a second event log, a
+  slot allocator, the terminal height, a path-fitting helper and the flicker,
+  for information that the verdicts scrolling past already carry. Do not
+  reintroduce it.
+- Hide the cursor for the duration (`\033[?25l`) or it is visibly dragged back
+  to column zero on every redraw; restore it (`\033[?25h`) on every exit path,
+  the interrupt one included, or the terminal is left without a cursor.
 - `! -path "*/.*"` filters hidden entries out of results but does **not** stop
   `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
   walk starts at `.`, which a bare `.*` matches, pruning the entire tree.

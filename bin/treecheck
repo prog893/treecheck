@@ -181,7 +181,7 @@ cleanup_tmp() {
     remove_tmp "$FILE_LIST" "${SORTED_LIST:-}" \
                "$FIND_ERR" "${ALL_LIST:-}" \
                "${ORDERED_PATHS:-}" "$WORK_INPUT" \
-               "${CREATED_LOG:-}" "${INFLIGHT:-}" "${DONE_LOG:-}" \
+               "${CREATED_LOG:-}" "${DONE_LOG:-}" \
                "${MONBUF:-}" \
                "${STREAMED_LOG:-}" "${NEEDS_PRINT:-}" "${ALL_IDX:-}"
     remove_tmp_dir "$RESULTS_DIR"
@@ -566,19 +566,6 @@ create_file_hash() {
 hash_worker() {
     local i="$1" f="$2" out rc
     set_display_path "$f"
-    # Progress events travel only when an interactive display is wired up.
-    # Both writes are a handful of bytes, small enough that concurrent
-    # appends cannot interleave.
-    if [ -n "${INFLIGHT:-}" ]; then
-        # Display-only bookkeeping: losing an entry makes the status line
-        # less informative, never the verification less correct.
-        # The sanitized form, not the raw path: the monitor builds the
-        # "hashing:" list straight from this file and prints it to the
-        # terminal, so a raw name here would walk around the escaping.
-        if ! printf '%s\t%s\n' "$i" "$DISPLAY_PATH" 2>/dev/null >> "$INFLIGHT"; then
-            echo "treecheck: progress tracking is degraded for this file" >&2
-        fi
-    fi
     if [ "$WORKER_MODE" = "create" ]; then
         out=$(create_file_hash "$f" 2>&1); rc=$?
     else
@@ -617,11 +604,17 @@ hash_worker() {
     return 0
 }
 
-# Live display for an interactive terminal: completed verdicts scroll above
-# a continuously redrawn status line carrying a spinner, the done count out
-# of the total, elapsed time, and what is currently being hashed. Completions
-# arrive in whatever order the workers finish; strict walk order is a
-# property of the piped output, not of a live view.
+# Live display for an interactive terminal: completed verdicts scroll above a
+# single status line carrying the done count out of the total, byte-weighted
+# progress, throughput, the worker count, elapsed time and the estimate.
+# Completions arrive in whatever order the workers finish; strict walk order
+# is a property of the piped output, not of a live view.
+#
+# One line, deliberately. The display used to carry a row per worker naming
+# the file each was hashing, which meant every verdict had to tear the whole
+# block down and lay it back out, one write per row in each direction. Naming
+# the in-flight files bought little on a tree whose verdicts already scroll
+# past, and cost a second event log, a slot allocator and the flicker.
 # Emit what arrived in $1 since byte $2 and set CONSUMED to those bytes.
 # Every event is a single write of a handful of bytes - well under any
 # buffering boundary - so a chunk can only ever end on a line boundary;
@@ -738,97 +731,47 @@ collect_sizes() {
     return 0
 }
 
-# Height of the terminal, for keeping the whole status block on screen. The
-# block is erased by moving the cursor up through it, and a block taller than
-# the terminal scrolls, which puts rows beyond the cursor's reach and leaves
-# them behind. Falls back to 24, the classic default.
-term_lines() {
-    local l=""
-    l=$(term_size); l=${l%% *}
-    case "$l" in
-        ''|*[!0-9]*|0) l=$(tput lines 2>/dev/null) || l="" ;;
-    esac
-    case "$l" in
-        ''|*[!0-9]*|0) l=24 ;;
-    esac
-    printf '%s' "$l"
-}
-
-# Keep the tail of an over-long path, which is where the filename is, and mark
-# the cut with a leading ellipsis.
-fit_path() {
-    local p="$1" w="$2"
-    if [ "${#p}" -le "$w" ]; then
-        printf '%s' "$p"
-    elif [ "$w" -gt 1 ]; then
-        printf '...%s' "${p:$(( ${#p} - w + 3 ))}"
-    else
-        printf '%s' "${p:0:$w}"
-    fi
-}
-
-# Erase the status block by walking the cursor back up through it. Every write
-# that is not part of the block has to be preceded by this, or the block ends
-# up interleaved with the verdicts scrolling past it.
-BLOCK_H=0
-
+# The status line occupies exactly one row, which is what makes it cheap to
+# erase: a carriage return and a clear-to-end-of-line, in the same write as
+# whatever replaces it. A multi-row block had to be torn down by walking the
+# cursor up through it, one write per row, and rebuilt from scratch after
+# every verdict; the terminal painted each of those writes separately and the
+# eye read the sequence as flicker.
+ERASE_ROW=$'\r'$'\033'"[K"
 CURSOR_HIDE=$'\033[?25l'
 CURSOR_SHOW=$'\033[?25h'
+STATUS_SHOWN=0
+STATUS_PREV=""
 erase_block() {
-    [ "$BLOCK_H" -gt 0 ] || return 0
-    local i=1
-    printf '\r\033[K'
-    while [ "$i" -lt "$BLOCK_H" ]; do
-        printf '\033[1A\r\033[K'
-        i=$((i+1))
-    done
-    BLOCK_H=0
-    # The cached rows describe a block that no longer exists.
-    ROW_PREV=()
+    [ "$STATUS_SHOWN" -eq 1 ] || return 0
+    printf '%s' "$ERASE_ROW"
+    STATUS_SHOWN=0
+    STATUS_PREV=""
     return 0
 }
 
 progress_monitor() {
     local total="$1" xpid="$2"
-    # Both event logs are consumed through byte offsets, so each tick pays
-    # only for events that arrived since the last one. The active set is
-    # maintained incrementally for the same reason: started entries are
-    # appended as they arrive, completed ones are filtered out, and its
-    # size never exceeds the number of workers actually mid-file.
-    local doff=0 ioff=0 done=0 spin=0 start=$SECONDS idx line frames='|/-\\|'
+    # The completion log is consumed through a byte offset, so each tick pays
+    # only for the events that arrived since the last one.
+    local doff=0 done=0 start=$SECONDS idx line
     local rate_x10 pct done_kb=0 elapsed rate_kb eta
-    local cols lines statusline maxrows shown slot row evline ev_idx ev_path
-    local frame nrows i sizetick=0
-    SLOT_IDX=() SLOT_PATH=() ROW_PREV=() ROW_NEW=()
-    # Hidden for the whole display: otherwise the cursor is visibly walked up
-    # and down the block on every frame.
+    local cols statusline out sizetick=0
+    STATUS_SHOWN=0
+    STATUS_PREV=""
+    # Hidden for the whole display: otherwise it sits at the end of the status
+    # line and is visibly dragged back to column zero on every redraw.
     printf '%s' "$CURSOR_HIDE"
+    cols=$(term_cols)
     while [ "$INTERRUPTED" -eq 0 ] && kill -0 "$xpid" 2>/dev/null; do
-        if ! consume_new "$INFLIGHT" "$ioff"; then
-            erase_block
-            printf 'progress events unreadable; retrying\n'
-            sleep 0.5
-            continue
-        fi
-        if [ "$CONSUMED" -gt 0 ]; then
-            ioff=$((ioff+CONSUMED))
-            while IFS= read -r evline; do
-                # Claim the first free slot. A file keeps that row until it
-                # finishes, so rows stay put instead of reshuffling every time
-                # a neighbour completes.
-                ev_idx=${evline%%$'\t'*}
-                ev_path=${evline#*$'\t'}
-                slot=0
-                while [ "$slot" -lt "$JOBS" ]; do
-                    if [ -z "${SLOT_IDX[$slot]:-}" ]; then
-                        SLOT_IDX[slot]=$ev_idx
-                        SLOT_PATH[slot]=$ev_path
-                        break
-                    fi
-                    slot=$((slot+1))
-                done
-            done < "$MONBUF"
-        fi
+        # Everything this tick emits is accumulated here and written once.
+        #
+        # A write per verdict lets the terminal paint a partial frame between
+        # them, which is what the eye reads as flicker, and a quarter-second
+        # tick on a parallel run routinely carries several completions. One
+        # write makes the whole update atomic. A tick that has no verdict and
+        # no change to the status text writes nothing at all.
+        out=""
         if ! consume_new "$DONE_LOG" "$doff"; then
             erase_block
             printf 'progress events unreadable; retrying\n'
@@ -846,38 +789,30 @@ progress_monitor() {
                 # is left. An index with no recorded size contributes zero,
                 # which loses a little accuracy and never stalls the display.
                 done_kb=$((done_kb + ${SIZE_KB[$idx]:-0}))
-                # The completed index gives its row back.
-                slot=0
-                while [ "$slot" -lt "$JOBS" ]; do
-                    if [ "${SLOT_IDX[$slot]:-}" = "$idx" ]; then
-                        SLOT_IDX[slot]=""
-                        SLOT_PATH[slot]=""
-                        break
-                    fi
-                    slot=$((slot+1))
-                done
                 if ! printf '%s\n' "$idx" 2>/dev/null >> "$STREAMED_LOG"; then
-                    erase_block
-                    printf 'could not record a display ledger entry; that verdict will appear again in walk order\n'
+                    out="$out$ERASE_ROW"'could not record a display ledger entry; that verdict will appear again in walk order'$'\n'
+                    STATUS_SHOWN=0
+                    STATUS_PREV=""
                     continue
                 fi
                 if [ -s "$RESULTS_DIR/$idx" ]; then
                     IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
                     line=${line//"$ESC_NL"/$'\n'}
-                    erase_block
-                    printf '%s\n' "$line"
+                    # The leading erase lands on the row the status line is
+                    # occupying, so the verdict takes it over and the status
+                    # line is redrawn below at the end of the tick.
+                    out="$out$ERASE_ROW$line"$'\n'
+                    STATUS_SHOWN=0
+                    STATUS_PREV=""
                 fi
             done < "$MONBUF"
         fi
         elapsed=$((SECONDS-start))
-        # Re-read periodically rather than every tick: two subprocesses per
-        # frame is real cost at this rate, and a resize only needs picking up
+        # Re-read periodically rather than every tick: a subprocess per frame
+        # is real cost at this rate, and a resize only needs picking up
         # promptly, not instantly. Anything stale here is corrected within a
         # couple of seconds, well before it could strand a wrapped row.
-        if [ "$((sizetick % 8))" -eq 0 ]; then
-            cols=$(term_cols)
-            lines=$(term_lines)
-        fi
+        [ "$((sizetick % 8))" -eq 0 ] && cols=$(term_cols)
         sizetick=$((sizetick+1))
 
         if [ "$BYTES_OK" -eq 1 ]; then
@@ -892,10 +827,11 @@ progress_monitor() {
             else
                 eta="--"
             fi
-            statusline=$(printf ' %s %d/%d %d%% %s/%s %s %s/s eta %s' \
-                "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
+            statusline=$(printf '%d/%d | %d%% (%s/%s) | %s/s | %d workers | elapsed %s | eta %s' \
+                "$done" "$total" "$pct" \
                 "$(human_kb "$done_kb")" "$(human_kb "$TOTAL_KB")" \
-                "$(fmt_dur "$elapsed")" "$(human_kb "$rate_kb")" "$eta")
+                "$(human_kb "$rate_kb")" "$JOBS" \
+                "$(fmt_dur "$elapsed")" "$eta")
         else
             # No usable sizes, so the percentage falls back to the file count
             # and there is nothing honest to base an estimate on.
@@ -904,79 +840,29 @@ progress_monitor() {
             [ "$elapsed" -gt 0 ] && rate_x10=$((done*10/elapsed))
             pct=0
             if [ "$total" -gt 0 ]; then pct=$((done*100/total)); fi
-            statusline=$(printf ' %s %d/%d %d%% %s %d.%d files/s' \
-                "${frames:$((spin%4)):1}" "$done" "$total" "$pct" \
-                "$(fmt_dur "$elapsed")" "$((rate_x10/10))" "$((rate_x10%10))")
+            statusline=$(printf '%d/%d | %d%% | %d.%d files/s | %d workers | elapsed %s' \
+                "$done" "$total" "$pct" \
+                "$((rate_x10/10))" "$((rate_x10%10))" "$JOBS" \
+                "$(fmt_dur "$elapsed")")
         fi
+        # Truncated to one row before it is drawn. A status line that wraps
+        # onto a second row can never be erased by a carriage return, which
+        # returns to the last display row, and the first row stays behind for
+        # the rest of the run.
+        statusline=${statusline:0:$((cols-1))}
 
-        # One row per worker slot, so a row keeps its place instead of jumping
-        # as neighbours finish. Capped to what the terminal can hold alongside
-        # the summary row, with the remainder counted rather than drawn.
-        maxrows=$((lines-3))
-        [ "$maxrows" -lt 1 ] && maxrows=1
-        shown="$JOBS"
-        [ "$shown" -gt "$maxrows" ] && shown="$maxrows"
-
-        # Compose the rows first, then emit the whole frame in ONE write, and
-        # only for rows whose text actually changed.
-        #
-        # Both halves matter. A printf per row lets the terminal draw a partial
-        # frame between them, which is what the eye reads as flicker; batching
-        # makes the update atomic. And rewriting a row that has not changed
-        # costs a repaint for nothing, so the worker rows, which change only
-        # when a file starts or finishes, stay untouched on most ticks while
-        # the summary row updates every tick.
-        frame=""
-        nrows=0
-        slot=0
-        while [ "$slot" -lt "$shown" ]; do
-            row=$(printf '  [%2d] %s' "$((slot+1))" \
-                "$(fit_path "${SLOT_PATH[$slot]:-(idle)}" $((cols-8)))")
-            ROW_NEW[nrows]=${row:0:$((cols-1))}
-            nrows=$((nrows+1))
-            slot=$((slot+1))
-        done
-        if [ "$JOBS" -gt "$shown" ]; then
-            ROW_NEW[nrows]="  +$((JOBS-shown)) more worker slots"
-            nrows=$((nrows+1))
+        # Redrawing text that has not changed costs a repaint for nothing.
+        if [ "$STATUS_SHOWN" -eq 0 ] || [ "$statusline" != "$STATUS_PREV" ]; then
+            out="$out$ERASE_ROW$statusline"
+            STATUS_PREV=$statusline
+            STATUS_SHOWN=1
         fi
-        ROW_NEW[nrows]=${statusline:0:$((cols-1))}
-        nrows=$((nrows+1))
-
-        if [ "$BLOCK_H" -ne "$nrows" ]; then
-            # Height changed, so the cached rows describe a different block and
-            # every line has to be laid down again.
-            erase_block
-            i=0
-            while [ "$i" -lt "$nrows" ]; do
-                frame="$frame${ROW_NEW[$i]}"$'\033'"[K"
-                [ "$((i+1))" -lt "$nrows" ] && frame="$frame"$'\n'
-                ROW_PREV[i]=${ROW_NEW[$i]}
-                i=$((i+1))
-            done
-            printf '%s' "$frame"
-            BLOCK_H=$nrows
-        else
-            # Walk down the existing block, redrawing only what differs. A row
-            # that is unchanged costs one cursor-down and no repaint.
-            frame=$'\r'$'\033'"[$((BLOCK_H-1))A"
-            [ "$BLOCK_H" -eq 1 ] && frame=$'\r'
-            i=0
-            while [ "$i" -lt "$nrows" ]; do
-                if [ "${ROW_PREV[$i]:-}" != "${ROW_NEW[$i]}" ]; then
-                    frame="$frame"$'\r'"${ROW_NEW[$i]}"$'\033'"[K"
-                    ROW_PREV[i]=${ROW_NEW[$i]}
-                fi
-                [ "$((i+1))" -lt "$nrows" ] && frame="$frame"$'\033'"[1B"
-                i=$((i+1))
-            done
-            printf '%s' "$frame"
-        fi
-        spin=$((spin+1))
+        [ -n "$out" ] && printf '%s' "$out"
         sleep 0.25
     done
     # Final drain for events that landed between the last poll and exit.
     # On a failed read the ordered replay picks everything up anyway.
+    out=""
     if ! consume_new "$DONE_LOG" "$doff"; then
         erase_block
         printf 'progress events unreadable\n'
@@ -990,11 +876,13 @@ progress_monitor() {
             if [ -s "$RESULTS_DIR/$idx" ]; then
                 IFS=$'\t' read -r _ _ line < "$RESULTS_DIR/$idx" || line=""
                 line=${line//"$ESC_NL"/$'\n'}
-                erase_block
-                printf '%s\n' "$line"
+                out="$out$ERASE_ROW$line"$'\n'
+                STATUS_SHOWN=0
+                STATUS_PREV=""
             fi
         done < "$MONBUF"
     fi
+    [ -n "$out" ] && printf '%s' "$out"
     erase_block
     printf '%s' "$CURSOR_SHOW"
 }
@@ -1094,10 +982,9 @@ parallel_process_files() {
 
     WORKER_MODE="$mode"
     STREAMED=0
-    INFLIGHT="" DONE_LOG="" MONBUF="" STREAMED_LOG="" NEEDS_PRINT="" ALL_IDX=""
+    DONE_LOG="" MONBUF="" STREAMED_LOG="" NEEDS_PRINT="" ALL_IDX=""
     STREAMED_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
     if [ -t 1 ]; then
-        INFLIGHT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         DONE_LOG=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         MONBUF=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         NEEDS_PRINT=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
@@ -1105,7 +992,7 @@ parallel_process_files() {
         ORDERED_PATHS=$(mktemp "${TMPDIR:-/tmp}/treecheck.XXXXXX") || { error "cannot create temporary file"; exit 1; }
         STREAMED=1
     fi
-    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR INFLIGHT DONE_LOG ESC_NL
+    export WORKER_MODE HASH_EXT FORCE NO_VERIFY CREATED_LOG RESULTS_DIR DONE_LOG ESC_NL
     export VERDICT_W
     export -f hash_worker verify_file_hash create_file_hash compute_hash set_display_path print_verdict is_sha256
 
