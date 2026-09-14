@@ -91,15 +91,18 @@ func walkTree(root string, maxDepth int, exclude []string, hashExt string) walkR
 			if excl[name] {
 				return fs.SkipDir
 			}
+			// This prune is what enforces --max-depth, not merely an
+			// optimization on top of a second check: a directory at the
+			// limit is never entered, so nothing below it is visited.
+			// Filtering files by depth afterwards would give the same
+			// answer while still descending the whole tree, and two
+			// checks enforcing one rule means either can rot unnoticed.
 			if maxDepth > 0 && depth >= maxDepth {
 				return fs.SkipDir
 			}
 			return nil
 		}
 		if !d.Type().IsRegular() {
-			return nil
-		}
-		if maxDepth > 0 && depth > maxDepth {
 			return nil
 		}
 		res.Total++

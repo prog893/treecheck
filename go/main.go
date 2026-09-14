@@ -75,12 +75,11 @@ EXAMPLES:
 `)
 }
 
-func fail(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "ERROR: "+format+"\n", args...)
-}
-
-func parseArgs(argv []string) (*options, int) {
+func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 	o := &options{jobs: -1}
+	fail := func(format string, args ...any) {
+		fmt.Fprintf(stderr, "ERROR: "+format+"\n", args...)
+	}
 	i := 0
 	needInt := func(flag string) (int, bool) {
 		i++
@@ -99,10 +98,10 @@ func parseArgs(argv []string) (*options, int) {
 		a := argv[i]
 		switch {
 		case a == "-h" || a == "--help":
-			usage(os.Stdout)
+			usage(stdout)
 			return nil, 0
 		case a == "-V" || a == "--version":
-			fmt.Printf("treecheck %s\n", version)
+			fmt.Fprintf(stdout, "treecheck %s\n", version)
 			return nil, 0
 		case a == "--strict":
 			o.strict = true
@@ -129,7 +128,7 @@ func parseArgs(argv []string) (*options, int) {
 			o.exclude = append(o.exclude, strings.Split(argv[i], ",")...)
 		case strings.HasPrefix(a, "--"):
 			fail("unknown option: %s", a)
-			usage(os.Stdout)
+			usage(stdout)
 			return nil, 1
 		case strings.HasPrefix(a, "-") && len(a) > 1:
 			// Clustered short flags, so -cn works like -c -n.
@@ -145,7 +144,7 @@ func parseArgs(argv []string) (*options, int) {
 					o.verbose = true
 				default:
 					fail("unknown option: -%c", r)
-					usage(os.Stdout)
+					usage(stdout)
 					return nil, 1
 				}
 			}
@@ -159,7 +158,7 @@ func parseArgs(argv []string) (*options, int) {
 	}
 	if o.dir == "" {
 		fail("no directory given")
-		usage(os.Stdout)
+		usage(stdout)
 		return nil, 1
 	}
 	if o.noVerify && !o.create {
@@ -172,20 +171,50 @@ func parseArgs(argv []string) (*options, int) {
 		return nil, 1
 	}
 	if o.jobs < 1 {
-		o.jobs = runtime.NumCPU()
+		o.jobs = defaultJobs()
 	}
 	return o, -1
 }
 
-func main() { os.Exit(run(os.Args[1:])) }
+// defaultJobs caps the worker count well below the core count on purpose.
+//
+// One worker hashes at roughly 2 GiB/s here, so eight of them muster more
+// hashing capacity than any single NVMe can feed, and past that point the
+// workers contend for the disk rather than sharing it. Measured on a 24-core
+// M2 Ultra across three workload shapes, wall clock against worker count:
+//
+//	-j       2000 tiny   6x400MiB   300x384KiB
+//	 1          0.514      1.261        0.179
+//	 8          0.074      0.228        0.041
+//	24          0.132      0.229        0.040
+//	32          0.136      0.230        0.042
+//
+// Eight is at or within noise of the best time in every column, and the tiny
+// file case degrades by 80% by the time the count reaches the core count. The
+// shell implementation defaulted to one worker per core because it was paying
+// a process spawn per file and needed the concurrency to hide it; nothing here
+// pays that, so the default follows the measurement instead.
+//
+// -j overrides this, and is the right knob for a device that genuinely wants
+// more in flight.
+func defaultJobs() int {
+	if n := runtime.NumCPU(); n < 8 {
+		return n
+	}
+	return 8
+}
 
-func run(argv []string) int {
-	o, code := parseArgs(argv)
+func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+
+func run(argv []string, stdout, stderr *os.File) int {
+	o, code := parseArgs(argv, stdout, stderr)
 	if o == nil {
 		return code
 	}
 
-	stdout := os.Stdout
+	fail := func(format string, args ...any) {
+		fmt.Fprintf(stderr, "ERROR: "+format+"\n", args...)
+	}
 	tty := isTerminal(stdout)
 	c := newColors(tty)
 	start := time.Now()
@@ -201,14 +230,14 @@ func run(argv []string) int {
 	if o.maxDepth > 0 {
 		scope = fmt.Sprintf("Depth: %d", o.maxDepth)
 	}
-	fmt.Printf("Mode: %s | Dir: %s | %s\n", mode, displayPath(o.dir), scope)
+	fmt.Fprintf(stdout, "Mode: %s | Dir: %s | %s\n", mode, displayPath(o.dir), scope)
 	if len(o.exclude) > 0 {
-		fmt.Printf("Excluding: %s\n", strings.Join(o.exclude, " "))
+		fmt.Fprintf(stdout, "Excluding: %s\n", strings.Join(o.exclude, " "))
 	}
 	if o.jobs > 1 {
-		fmt.Printf("Workers: %d (parallel hashing)\n", o.jobs)
+		fmt.Fprintf(stdout, "Workers: %d (parallel hashing)\n", o.jobs)
 	}
-	fmt.Println()
+	fmt.Fprintln(stdout)
 
 	w := walkTree(o.dir, o.maxDepth, o.exclude, hashExt)
 	if w.Err != nil {
@@ -218,7 +247,7 @@ func run(argv []string) int {
 	}
 	if o.verbose {
 		if skipped := w.Total - len(w.Files); skipped > 0 {
-			fmt.Printf("Skipping %d file(s): sidecars and excluded paths\n\n", skipped)
+			fmt.Fprintf(stdout, "Skipping %d file(s): sidecars and excluded paths\n\n", skipped)
 		}
 	}
 
@@ -257,7 +286,7 @@ func run(argv []string) int {
 		if disp != nil {
 			disp.Commit([]string{line})
 		} else {
-			fmt.Println(line)
+			fmt.Fprintln(stdout, line)
 		}
 	}
 
@@ -274,7 +303,7 @@ func run(argv []string) int {
 			return
 		}
 		for _, l := range lines {
-			fmt.Println(l)
+			fmt.Fprintln(stdout, l)
 		}
 	}
 	pending := map[int]Verdict{}
@@ -324,17 +353,17 @@ func run(argv []string) int {
 	wasInterrupted := sawSignal
 	sigMu.Unlock()
 
-	fmt.Println()
+	fmt.Fprintln(stdout)
 	counts.Write(stdout, c, o.create, int64(time.Since(start).Seconds()))
 
 	rc := counts.ExitCode(w.Err != nil, wasInterrupted, o.strict, o.create)
 	switch rc {
 	case 0:
-		fmt.Println(c.green("✓ Completed successfully"))
+		fmt.Fprintln(stdout, c.green("✓ Completed successfully"))
 	case 2:
-		fmt.Println(c.yellow("Completed: nothing corrupt, but some files have no sidecar"))
+		fmt.Fprintln(stdout, c.yellow("Completed: nothing corrupt, but some files have no sidecar"))
 	case 130:
-		fmt.Println(c.yellow("Interrupted: the counters above cover only the files reached"))
+		fmt.Fprintln(stdout, c.yellow("Interrupted: the counters above cover only the files reached"))
 	default:
 		fail("Completed with errors")
 	}

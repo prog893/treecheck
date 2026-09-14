@@ -36,13 +36,33 @@ all thirteen are channels and struct fields:
 `is_our_tmp`, the `E2BIG` batching in `remove_tmp_dir`, and the rule against
 deriving one temp name from another all go with them.
 
+## The test suite owns the contract
+
+`go test ./...` is the primary suite. It does not consult the shell version:
+it asserts the documented behavior directly, so it stays meaningful once the
+shell version is gone. `difftest.sh` is the migration aid, and is expected to
+be retired.
+
+The suite is validated by mutation: each claim was checked by deliberately
+breaking the behavior it describes and confirming the intended test fails.
+Two mutations initially survived, and both were real findings rather than test
+gaps:
+
+- `--max-depth` was enforced twice, once by pruning directories at the limit
+  and again by filtering files below it. Either alone was correct, so removing
+  either changed nothing. Two checks enforcing one rule means either can rot
+  unnoticed; the file-level filter is gone and the prune carries the rule.
+- `-e` excluded by whole directory name, but nothing asserted it. A mutation to
+  substring matching passed. The fixture now includes `cache.bin`, `precache/`
+  and `cache-old/`, all of which must survive `-e cache`.
+
 ## Known gaps
 
+- Interrupt handling is verified by driving the built binary, not from `go
+  test`: the handler is process-wide, so an in-process test would have to
+  signal the test runner itself.
 - Sequential and parallel paths are one code path here, so there is no engine
   parity contract to maintain. The shell version's two-engine tests do not
   apply.
-- The default worker count is `NumCPU`, which is tuned for the shell version's
-  per-file process overhead. On a tree of small files this build is measurably
-  faster at `-j 8` than at `-j 24`; the default should be revisited.
 - `-v` reports a count of skipped files rather than naming them.
 - No Homebrew formula, no release wiring.
