@@ -239,6 +239,33 @@ README option list still agree. They have drifted apart before.
   `Pathname#write` and `File.write` both overwrite happily, so use `File.write`
   when a test deliberately corrupts a fixture.
 
+## The Go draft
+
+`go/` holds a rewrite in progress. **The shell script is still the shipped
+implementation and the reference for behavior.** Nothing in `go/` is released,
+and `bin/treecheck` is what `brew install` gets.
+
+- `go test ./...` is the primary suite and asserts the documented behavior
+  directly, so it stays meaningful once the shell version is gone. Run it with
+  `-race` as well: that is the only thing exercising the display's sharing.
+- `go/difftest.sh <binary>` diffs the two implementations over identical
+  fixtures, on stdout, stderr and exit status. Any difference is a bug in the
+  Go build until it is listed in the harness's `norm()` with a reason. It is a
+  migration aid and is expected to be retired.
+- Error message wording is matched to the shell version verbatim. Nothing
+  parses these strings, but an unexplained difference in the harness costs more
+  attention than better phrasing is worth.
+- CI runs `gofmt`, `go vet`, `go build`, `go test` and `go test -race` on both
+  ubuntu and macOS, plus the differential on ubuntu. The tool's whole job is
+  filesystem behavior and the platforms disagree about enough of it that
+  passing on one says little about the other.
+- `go/difftest.sh` is covered by the shellcheck workflow alongside
+  `bin/treecheck`.
+
+Changes to behavior land in the shell version first, or in both. A Go-only
+change to something the shell version also does will fail the differential,
+which is the point.
+
 ## Working the review
 
 CodeRabbit reviews every push on its own. Do not ask for anything after a

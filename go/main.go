@@ -133,7 +133,7 @@ func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 			}
 			o.exclude = append(o.exclude, strings.Split(argv[i], ",")...)
 		case strings.HasPrefix(a, "--"):
-			fail("unknown option: %s", a)
+			fail("Unknown option: %s", a)
 			usage(stdout)
 			return nil, 1
 		case strings.HasPrefix(a, "-") && len(a) > 1:
@@ -149,31 +149,32 @@ func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 				case 'v':
 					o.verbose = true
 				default:
-					fail("unknown option: -%c", r)
+					fail("Unknown: -%c", r)
 					usage(stdout)
 					return nil, 1
 				}
 			}
 		default:
-			if o.dir != "" {
-				fail("more than one directory given: %s and %s", o.dir, a)
-				return nil, 1
-			}
+			// The reference takes the last positional rather than refusing a
+			// second one, and reports whichever it ended up with.
 			o.dir = a
 		}
 	}
 	if o.dir == "" {
-		fail("no directory given")
+		fail("No directory specified")
 		usage(stdout)
 		return nil, 1
 	}
 	if o.noVerify && !o.create {
-		fail("-n requires -c")
-		return nil, 1
+		// Not an error: -n is a valid flag that, without -c, asks for nothing.
+		// Reported on stdout and exiting 0, because a no-op ran correctly and
+		// a caller scripting on the exit status should not see a failure.
+		fmt.Fprintln(stdout, "Nothing to do: verify mode with skip-verify flag")
+		return nil, 0
 	}
 	fi, err := os.Stat(o.dir)
 	if err != nil || !fi.IsDir() {
-		fail("not a directory: %s", o.dir)
+		fail("Directory not found: %s", o.dir)
 		return nil, 1
 	}
 	if o.jobs < 1 {

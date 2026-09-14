@@ -22,4 +22,4 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version
-          shellcheck bin/treecheck
+          shellcheck bin/treecheck go/difftest.sh

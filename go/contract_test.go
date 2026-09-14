@@ -281,3 +281,21 @@ func TestStoppingIsNotFailing(t *testing.T) {
 		t.Errorf("stop observed exits %d, want 130", got)
 	}
 }
+
+// TestNoVerifyWithoutCreate: -n asks to skip verification, so without -c there
+// is nothing left to do. That is a no-op that ran correctly, not a failure, so
+// it reports on stdout and exits 0 rather than looking like an error to a
+// caller scripting on the status.
+func TestNoVerifyWithoutCreate(t *testing.T) {
+	root := tree{files: map[string]string{"a.bin": "x"}}.build(t)
+	r := runCLI(t, "-n", root)
+	if r.code != 0 {
+		t.Errorf("exit = %d, want 0", r.code)
+	}
+	if !strings.Contains(r.stdout, "Nothing to do") {
+		t.Errorf("stdout does not explain the no-op: %q", r.stdout)
+	}
+	if r.stderr != "" {
+		t.Errorf("a no-op should not write to stderr, got %q", r.stderr)
+	}
+}

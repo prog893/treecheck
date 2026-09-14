@@ -1,5 +1,11 @@
 .DS_Store
+
+# Sidecars this tool creates, so a run inside the repo leaves nothing to commit.
 *.sha256
 
-# Local build of the Go draft; the binary is not a tracked artifact.
+# Go build and test artifacts. The draft binary is built locally and from CI;
+# it is not a tracked artifact.
 go/treecheck-go
+*.test
+*.out
+coverage.*
