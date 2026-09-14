@@ -1,2 +1,5 @@
 .DS_Store
 *.sha256
+
+# Local build of the Go draft; the binary is not a tracked artifact.
+go/treecheck-go
