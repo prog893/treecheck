@@ -112,8 +112,6 @@ func watchKeys(ctx context.Context, d *Display, stop func(), done chan<- struct{
 			continue
 		}
 		switch buf[0] {
-		case '\t':
-			d.ToggleView()
 		case ' ':
 			d.ToggleExpanded()
 		case 'q', 'Q':

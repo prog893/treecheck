@@ -56,10 +56,9 @@ OPTIONS:
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
   --strict        Treat missing sidecars as a failure too
-  --dash          Full-screen dashboard (the default on a terminal)
-  --log           Scrolling verdict log with a status block instead
-  --review        Hold the terminal open at the end to look at the results
-  --no-review     Never hold it open
+  --log           Print verdicts to stdout instead of taking over the screen
+  --review        With --log, show the results view when the run ends
+  --no-review     Never show the results view
   -V, --version   Print version and exit
   -h              Show this help
 
@@ -115,6 +114,9 @@ func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 		case a == "--strict":
 			o.strict = true
 		case a == "--dash":
+			// Kept as a no-op: it named the default before the default
+			// became the default, and silently rejecting it would break
+			// anyone's muscle memory for nothing.
 			o.dash = true
 		case a == "--log":
 			o.log = true
@@ -234,6 +236,26 @@ func run(argv []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "ERROR: "+format+"\n", args...)
 	}
 	tty := isTerminal(stdout)
+
+	// An interactive terminal gets a full-screen view that owns the terminal
+	// and hands it back exactly as it found it. Nothing is written to stdout
+	// in that mode, deliberately: a scan is something you watch and then act
+	// on, not a wall of "ok" lines to leave behind in the scrollback. The
+	// findings are inspected in the results view before it exits.
+	//
+	// Output that is genuinely wanted as text goes through a pipe or a
+	// redirect, neither of which is a terminal, and both of which take the
+	// plain path below unchanged. --log asks for that path on a terminal too.
+	// Diagnostics for things that should not happen at all, a failed walk
+	// above all, keep going to stderr, which survives the screen being
+	// restored.
+	fullScreen := tty && !o.log
+	// out writes only when something is expected to be left on the screen.
+	out := func(format string, args ...any) {
+		if !fullScreen {
+			fmt.Fprintf(stdout, format, args...)
+		}
+	}
 	c := newColors(tty)
 	start := time.Now()
 
@@ -248,14 +270,14 @@ func run(argv []string, stdout, stderr *os.File) int {
 	if o.maxDepth > 0 {
 		scope = fmt.Sprintf("Depth: %d", o.maxDepth)
 	}
-	fmt.Fprintf(stdout, "Mode: %s | Dir: %s | %s\n", mode, displayPath(o.dir), scope)
+	out("Mode: %s | Dir: %s | %s\n", mode, displayPath(o.dir), scope)
 	if len(o.exclude) > 0 {
-		fmt.Fprintf(stdout, "Excluding: %s\n", strings.Join(o.exclude, " "))
+		out("Excluding: %s\n", strings.Join(o.exclude, " "))
 	}
 	if o.jobs > 1 {
-		fmt.Fprintf(stdout, "Workers: %d (parallel hashing)\n", o.jobs)
+		out("Workers: %d (parallel hashing)\n", o.jobs)
 	}
-	fmt.Fprintln(stdout)
+	out("\n")
 
 	w := walkTree(o.dir, o.maxDepth, o.exclude, hashExt)
 	if w.Err != nil {
@@ -265,7 +287,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 	}
 	if o.verbose {
 		if skipped := w.Total - len(w.Files); skipped > 0 {
-			fmt.Fprintf(stdout, "Skipping %d file(s): sidecars and excluded paths\n\n", skipped)
+			out("Skipping %d file(s): sidecars and excluded paths\n\n", skipped)
 		}
 	}
 
@@ -300,10 +322,8 @@ func run(argv []string, stdout, stderr *os.File) int {
 	stopKeys := func() {}
 	var disp *Display
 	if tty && len(w.Files) > 0 {
-		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes, o.dir, mode)
-		if !o.log {
-			disp.view.Store(viewDash)
-		}
+		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes,
+			o.dir, mode, fullScreen)
 		disp.Run()
 		// The key watcher gets its own cancellation, separate from the run's.
 		// Two readers on one terminal means whoever blocks on it first takes
@@ -323,11 +343,11 @@ func run(argv []string, stdout, stderr *os.File) int {
 		if disp != nil {
 			disp.Commit([]string{line})
 		} else {
-			fmt.Fprintln(stdout, line)
+			out("%s\n", line)
 		}
 	}
 
-	results := runWorkers(ctx, w.Files, o, disp)
+	verdicts := runWorkers(ctx, w.Files, o, disp)
 
 	// Emitted in walk order, always, whether the destination is a terminal or
 	// a pipe. Results arrive in completion order; a reorder buffer holds the
@@ -340,12 +360,12 @@ func run(argv []string, stdout, stderr *os.File) int {
 			return
 		}
 		for _, l := range lines {
-			fmt.Fprintln(stdout, l)
+			out("%s\n", l)
 		}
 	}
 	pending := map[int]Verdict{}
 	next := 0
-	for v := range results {
+	for v := range verdicts {
 		pending[v.Index] = v
 		for {
 			nv, ok := pending[next]
@@ -385,8 +405,11 @@ func run(argv []string, stdout, stderr *os.File) int {
 	stopKeys()
 	signal.Stop(sigc)
 
-	fmt.Fprintln(stdout)
-	counts.Write(stdout, c, o.create, int64(time.Since(start).Seconds()))
+	elapsed := int64(time.Since(start).Seconds())
+	if !fullScreen {
+		fmt.Fprintln(stdout)
+		counts.Write(stdout, c, o.create, elapsed)
+	}
 
 	rc := counts.ExitCode(w.Err != nil, interrupted.Load(), o.strict, o.create)
 
@@ -394,14 +417,20 @@ func run(argv []string, stdout, stderr *os.File) int {
 	// interrupted scan's problem list is a partial one, and holding the
 	// terminal open on it invites reading it as complete. A pipe, a
 	// redirected log and a script all take the path they always took.
-	holdOpen := tty && !o.noReview && !interrupted.Load()
-	switch {
-	case holdOpen && o.review:
-		// Asked for explicitly, so it holds whatever the outcome: being told
-		// a run came back clean is a result worth stopping on.
-		defer runReview(stdout, c, o.dir, counts.Failures, &counts)
-	case holdOpen && len(counts.Failures) > 0:
-		defer runReview(stdout, c, o.dir, counts.Failures, &counts)
+	// The full-screen view does not end when the scan does. It stays up with
+	// the results, because the whole reason to watch a scan is to act on what
+	// it found, and a screen that vanishes the moment it has something to say
+	// makes you re-run to read it.
+	if fullScreen && disp != nil {
+		res := results{
+			counts:  &counts,
+			root:    o.dir,
+			mode:    mode,
+			elapsed: elapsed,
+			status:  rc,
+		}
+		runReview(stdout, c, disp.Screen(), res)
+		return rc
 	}
 
 	switch rc {
@@ -413,6 +442,14 @@ func run(argv []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stdout, c.yellow("Interrupted: the counters above cover only the files reached"))
 	default:
 		fail("Completed with errors")
+	}
+
+	// On a terminal in --log mode the results view is opt-in, since the run
+	// has already printed everything it knows.
+	if tty && !o.noReview && !interrupted.Load() && (o.review || len(counts.Failures) > 0) {
+		runReview(stdout, c, nil, results{
+			counts: &counts, root: o.dir, mode: mode, elapsed: elapsed, status: rc,
+		})
 	}
 	return rc
 }

@@ -16,7 +16,7 @@ const (
 // and asserted without running a scan. Every field the panes read is set here.
 func fakeDisplay(jobs int) *Display {
 	d := NewDisplay(NewRenderer(os.Stdout), newColors(false), jobs, 1949, 29*tib/10,
-		"/Volumes/Media", "Verify only")
+		"/Volumes/Media", "Verify only", true)
 	d.start = time.Now().Add(-62 * time.Second)
 	d.doneFiles.Store(171)
 	d.doneBytes.Store(12 * tib / 10)

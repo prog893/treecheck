@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -164,11 +165,24 @@ type review struct {
 	c        *colors
 	out      *os.File
 	root     string
-	counts   *Counters
+	res      results
 	cache    map[int]forensics
 }
 
-func runReview(out *os.File, c *colors, root string, failures []Failure, counts *Counters) {
+// results is everything the view needs to describe a finished run.
+type results struct {
+	counts  *Counters
+	root    string
+	mode    string
+	elapsed int64
+	status  int
+}
+
+// runReview shows the finished run and waits. Passing an existing screen keeps
+// the alternate buffer the live view was already using, so the transition from
+// scanning to results does not flash the primary screen in between; passing nil
+// opens and closes one.
+func runReview(out *os.File, c *colors, sc *Screen, res results) {
 	restore, ok := rawMode(out)
 	if !ok {
 		return
@@ -176,13 +190,17 @@ func runReview(out *os.File, c *colors, root string, failures []Failure, counts 
 	defer restore()
 
 	rows, cols := terminalSize(out)
-	r := &review{
-		failures: failures, c: c, out: out, root: root, counts: counts,
-		sc:    NewScreen(out, rows, cols),
-		cache: map[int]forensics{},
+	owned := sc == nil
+	if owned {
+		sc = NewScreen(out, rows, cols)
 	}
-	r.sc.Enter()
-	defer r.sc.Leave()
+	r := &review{
+		failures: res.counts.Failures, c: c, out: out, root: res.root,
+		res: res, sc: sc, cache: map[int]forensics{},
+	}
+	sc.Enter()
+	defer sc.Leave()
+	sc.Resize(terminalSize(out))
 
 	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
 	if err != nil {
@@ -192,9 +210,15 @@ func runReview(out *os.File, c *colors, root string, failures []Failure, counts 
 
 	r.draw()
 	buf := make([]byte, 8)
+	fd := int(tty.Fd())
 	for {
-		n, err := tty.Read(buf)
-		if err != nil || n == 0 {
+		// syscall.Read for the same reason the key watcher uses it: a
+		// zero-byte read is a timeout, and os.File.Read reports it as EOF.
+		n, err := syscall.Read(fd, buf)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil || n <= 0 {
 			return
 		}
 		switch decodeKey(buf[:n]) {
@@ -363,15 +387,53 @@ func (r *review) render() []string {
 	}
 
 	out = append(out, hrule(bLT, bRT, cols, "detail", nil))
-	for _, l := range r.detailLines(cols-2, rows-len(out)-3) {
+	// Four rows follow the detail pane: its closing rule, the summary row, the
+	// key hints and the bottom border.
+	for _, l := range r.detailLines(cols-2, rows-len(out)-4) {
 		out = append(out, boxRow(cols, l))
 	}
 	out = append(out, hrule(bLT, bRT, cols, "", nil))
+	out = append(out, boxRow(cols, r.summaryLine(cols-2)))
 	out = append(out, boxRow(cols, r.c.dim(fmt.Sprintf(
 		" %d/%d   [↑↓ jk] move  [g G] first last  [q] quit",
 		r.sel+1, len(r.failures)))))
 	out = append(out, hrule(bBL, bBR, cols, "", nil))
 	return out
+}
+
+// summaryLine is the whole run in one row. In full-screen mode nothing is
+// written to stdout, so this view is the only place the counters appear and it
+// has to carry them rather than assume they scrolled past earlier.
+func (r *review) summaryLine(w int) string {
+	n := r.res.counts
+	left := fmt.Sprintf(" %d scanned · %s verified", n.Scanned, r.c.green(itoa(n.OK)))
+	if n.Created > 0 {
+		left += fmt.Sprintf(" · %d created", n.Created)
+	}
+	if n.Unverified > 0 {
+		left += fmt.Sprintf(" · %d not verified", n.Unverified)
+	}
+	if n.Unreached > 0 {
+		left += fmt.Sprintf(" · %s", r.c.yellow(itoa(n.Unreached)+" not reached"))
+	}
+	right := fmtDur(r.res.elapsed) + " · " + r.statusWord()
+	if pad := w - visibleLen(left) - visibleLen(right) - 1; pad > 0 {
+		return left + strings.Repeat(" ", pad) + right + " "
+	}
+	return truncVisible(left, w)
+}
+
+func (r *review) statusWord() string {
+	switch r.res.status {
+	case 0:
+		return r.c.green("clean")
+	case 2:
+		return r.c.yellow("no usable sidecar")
+	case 130:
+		return r.c.yellow("interrupted")
+	default:
+		return r.c.red("failed")
+	}
 }
 
 func (r *review) detailLines(w, h int) []string {
@@ -424,10 +486,25 @@ func (r *review) detailLines(w, h int) []string {
 // came back clean is a result, and being asked to press a key to dismiss it is
 // the point of having asked for the screen.
 func (r *review) renderClean(rows, cols int) []string {
-	n := r.counts
-	out := []string{hrule(bTL, bTR, cols, "nothing wrong", nil)}
+	n := r.res.counts
+	title := "nothing wrong"
+	headline := "every file matched its sidecar"
+	switch r.res.status {
+	case 130:
+		title, headline = "interrupted", "the counters below cover only the files reached"
+	case 2:
+		title, headline = "no usable sidecar", "nothing is corrupt, but some files have no sidecar yet"
+	}
+	out := []string{hrule(bTL, bTR, cols, title, nil)}
 	out = append(out, boxRow(cols, ""))
-	out = append(out, boxRow(cols, "  "+r.c.green("every file matched its sidecar")))
+	if r.res.status == 0 {
+		headline = r.c.green(headline)
+	} else {
+		headline = r.c.yellow(headline)
+	}
+	out = append(out, boxRow(cols, "  "+headline))
+	out = append(out, boxRow(cols, ""))
+	out = append(out, boxRow(cols, "  "+r.c.dim(displayPath(r.res.root)+" · "+r.res.mode)))
 	out = append(out, boxRow(cols, ""))
 	pair := func(label, value string) string {
 		gap := cols - 6 - len(label) - len(value)
@@ -444,6 +521,13 @@ func (r *review) renderClean(rows, cols int) []string {
 	if n.Unverified > 0 {
 		out = append(out, boxRow(cols, pair("not verified", itoa(n.Unverified))))
 	}
+	if n.Missing > 0 {
+		out = append(out, boxRow(cols, pair("no usable sidecar", itoa(n.Missing))))
+	}
+	if n.Unreached > 0 {
+		out = append(out, boxRow(cols, pair("not reached", itoa(n.Unreached))))
+	}
+	out = append(out, boxRow(cols, pair("elapsed", fmtDur(r.res.elapsed))))
 	out = append(out, boxRow(cols, ""))
 	out = append(out, hrule(bLT, bRT, cols, "", nil))
 	out = append(out, boxRow(cols, r.c.dim("  [q] quit")))

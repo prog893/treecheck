@@ -22,7 +22,7 @@ func TestDisplayConcurrency(t *testing.T) {
 
 	const jobs = 8
 	d := NewDisplay(NewRenderer(f), newColors(false), jobs, 400, 400<<20,
-		filepath.Join(t.TempDir(), "root"), "Verify only")
+		filepath.Join(t.TempDir(), "root"), "Verify only", true)
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -91,11 +91,6 @@ func TestDisplayConcurrency(t *testing.T) {
 			default:
 			}
 			d.expanded.Store(i%2 == 0)
-			if i%2 == 0 {
-				d.view.Store(viewDash)
-			} else {
-				d.view.Store(viewLog)
-			}
 			time.Sleep(time.Millisecond)
 		}
 	}()

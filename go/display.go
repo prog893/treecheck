@@ -40,10 +40,13 @@ type Display struct {
 
 	start    time.Time
 	expanded atomic.Bool
-	view     atomic.Int32
-	stop     chan struct{}
-	wg       sync.WaitGroup
-	screen   *Screen
+	// dash is fixed for the run. The two views are not interchangeable at
+	// runtime: the full-screen one deliberately writes nothing to stdout, and
+	// the scrolling one is nothing but writes to stdout.
+	dash   bool
+	stop   chan struct{}
+	wg     sync.WaitGroup
+	screen *Screen
 
 	// Descriptive fields for the dashboard header, fixed for the run.
 	root string
@@ -55,13 +58,6 @@ type Display struct {
 	lastB    int64
 	lastT    time.Time
 
-	// Verdicts emitted while the dashboard was up. The alternate screen is
-	// discarded on exit, so they are replayed to the restored screen rather
-	// than lost: the verdict stream is the product of this tool, and a view
-	// you switched into for a closer look must not cost you the log.
-	held    []string
-	heldCap bool
-
 	// rate is smoothed over the whole run rather than sampled per tick: an
 	// instantaneous rate on a mix of huge and tiny files swings hard enough
 	// to make the remaining estimate useless. The sparkline is the opposite:
@@ -69,17 +65,6 @@ type Display struct {
 	// stalling, so it keeps its own short history.
 	mu sync.Mutex
 }
-
-// View selects between the scrolling log and the full-screen dashboard.
-const (
-	viewLog int32 = iota
-	viewDash
-)
-
-// heldLineCap bounds the replay buffer. A run large enough to exceed it is one
-// whose verdicts belong in a pipe, so the overflow is reported rather than
-// silently dropped.
-const heldLineCap = 50000
 
 // recentCap is the ring the dashboard's stream pane draws from.
 const recentCap = 200
@@ -176,7 +161,7 @@ func (d *Display) sampleRate() {
 	d.lastT, d.lastB = now, seen
 }
 
-func NewDisplay(r *Renderer, c *colors, jobs, total int, totalBytes int64, root, mode string) *Display {
+func NewDisplay(r *Renderer, c *colors, jobs, total int, totalBytes int64, root, mode string, dash bool) *Display {
 	d := &Display{
 		r:          r,
 		c:          c,
@@ -187,6 +172,7 @@ func NewDisplay(r *Renderer, c *colors, jobs, total int, totalBytes int64, root,
 		stop:       make(chan struct{}),
 		root:       root,
 		mode:       mode,
+		dash:       dash,
 	}
 	for i := range d.slots {
 		s := &slot{}
@@ -249,7 +235,7 @@ func (d *Display) Run() {
 	//
 	// Only the log view owns a scrolling region. Starting one while the
 	// dashboard is up would scroll the primary screen behind it.
-	if d.view.Load() == viewLog {
+	if !d.dash {
 		d.r.Start(d.footerHeight(), d.repaint)
 	}
 	d.wg.Add(1)
@@ -274,7 +260,7 @@ func (d *Display) Run() {
 // footer, the dashboard holds the alternate buffer, and switching hands the
 // terminal from one to the other rather than layering them.
 func (d *Display) repaint() {
-	if d.view.Load() == viewDash {
+	if d.dash {
 		rows, cols := d.r.Size()
 		d.mu.Lock()
 		sc := d.screen
@@ -297,34 +283,37 @@ func (d *Display) repaint() {
 	d.r.SetFooter(d.frame())
 }
 
+// Close stops the frame loop. In full-screen mode the screen itself is left
+// alone, because the caller goes on using it for the results view.
 func (d *Display) Close() {
 	close(d.stop)
 	d.wg.Wait()
-	d.leaveDash()
-	d.r.Stop()
+	if !d.dash {
+		d.r.Stop()
+	}
 }
 
-// Commit prints finished verdicts. In the log view they scroll past above the
-// pinned footer. In the dashboard they feed the stream pane and are held for
-// replay, because the alternate buffer is discarded on exit.
+// Screen is the alternate-screen buffer the full-screen view draws into, so the
+// results view can carry on using it rather than tearing it down and opening
+// another, which flashes the primary screen in between.
+func (d *Display) Screen() *Screen {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.screen
+}
+
+// Commit records finished verdicts. In the scrolling view they are written to
+// stdout above the status block. In the full-screen view they feed the stream
+// pane and go nowhere else: that view owns the terminal and leaves it as it
+// found it, so writing to stdout would leave behind output nobody asked to keep.
 func (d *Display) Commit(lines []string) {
 	d.mu.Lock()
-	for _, l := range lines {
-		d.recent = append(d.recent, l)
-	}
+	d.recent = append(d.recent, lines...)
 	if len(d.recent) > recentCap {
 		d.recent = d.recent[len(d.recent)-recentCap:]
 	}
-	dash := d.view.Load() == viewDash
-	if dash {
-		if len(d.held)+len(lines) > heldLineCap {
-			d.heldCap = true
-		} else {
-			d.held = append(d.held, lines...)
-		}
-	}
 	d.mu.Unlock()
-	if !dash {
+	if !d.dash {
 		d.r.Commit(lines)
 	}
 }
@@ -332,41 +321,6 @@ func (d *Display) Commit(lines []string) {
 func (d *Display) ToggleExpanded() {
 	d.expanded.Store(!d.expanded.Load())
 	d.repaint()
-}
-
-// ToggleView hands the terminal between the two views.
-func (d *Display) ToggleView() {
-	if d.view.Load() == viewDash {
-		d.leaveDash()
-		d.view.Store(viewLog)
-		d.r.Start(d.footerHeight(), d.repaint)
-	} else {
-		d.r.Stop()
-		d.view.Store(viewDash)
-	}
-	d.repaint()
-}
-
-// leaveDash restores the primary screen and replays everything the dashboard
-// showed, so switching views never costs the verdict log.
-func (d *Display) leaveDash() {
-	d.mu.Lock()
-	sc := d.screen
-	held := d.held
-	capped := d.heldCap
-	d.held = nil
-	d.heldCap = false
-	d.mu.Unlock()
-	if sc == nil {
-		return
-	}
-	sc.Leave()
-	if capped {
-		fmt.Fprintf(d.r.out, "... earlier verdicts were not held; pipe the output to keep a full log\n")
-	}
-	for _, l := range held {
-		fmt.Fprintln(d.r.out, l)
-	}
 }
 
 // bar renders a proportional bar in block characters. Eighth-blocks give the

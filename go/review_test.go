@@ -31,6 +31,13 @@ func fakeReview(n int) *review {
 	}
 	return &review{
 		failures: fs, c: newColors(false), out: os.Stdout, root: "/Volumes/Media",
+		res: results{
+			counts:  &Counters{Scanned: 500, OK: 500 - n, Failures: fs},
+			root:    "/Volumes/Media",
+			mode:    "Verify only",
+			elapsed: 62,
+			status:  1,
+		},
 		sc: NewScreen(os.Stdout, 30, 100), cache: map[int]forensics{},
 	}
 }
