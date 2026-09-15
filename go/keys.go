@@ -85,14 +85,27 @@ func watchKeys(ctx context.Context, d *Display, stop func(), done chan<- struct{
 	defer restore()
 
 	buf := make([]byte, 8)
+	fd := int(tty.Fd())
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		n, err := tty.Read(buf)
-		if err != nil {
+		// syscall.Read, not tty.Read.
+		//
+		// os.File.Read turns a zero-byte read into io.EOF, and under VTIME
+		// every timeout IS a zero-byte read. Treating that as an error made
+		// the watcher exit a tenth of a second into the run, restoring the
+		// terminal to cooked mode on its way out: keystrokes were echoed,
+		// arrow keys appeared as ^[[A, and nothing responded for the rest of
+		// the run. The raw call reports a timeout as n=0 with no error, which
+		// is what it is.
+		n, err := syscall.Read(fd, buf)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil || n < 0 {
 			return
 		}
 		if n == 0 {
