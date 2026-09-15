@@ -163,3 +163,16 @@ func padVisible(s string, w int) string {
 	}
 	return s
 }
+
+// exactBytes is for the review screen, where the exact count is the reading
+// that matters: humanBytes rounds to KiB, so every small file showed as "0KiB",
+// and a file truncated to a handful of bytes is diagnostic on its own.
+func exactBytes(n int64) string {
+	if n < 1<<20 {
+		if n == 1 {
+			return "1 byte"
+		}
+		return fmt.Sprintf("%d bytes", n)
+	}
+	return fmt.Sprintf("%s (%d bytes)", humanBytes(n), n)
+}

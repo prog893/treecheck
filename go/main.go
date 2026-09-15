@@ -30,11 +30,12 @@ type options struct {
 	noVerify bool
 	strict   bool
 	verbose  bool
-	quiet    bool
 	jobs     int
 	maxDepth int
 	exclude  []string
 	dash     bool
+	review   bool
+	noReview bool
 }
 
 func usage(w *os.File) {
@@ -55,6 +56,8 @@ OPTIONS:
   --max-depth N   Descend at most N levels
   --strict        Treat missing sidecars as a failure too
   --dash          Start in the full-screen dashboard
+  --review        Browse the problems interactively when the run ends
+  --no-review     Never do that, even after --dash
   -V, --version   Print version and exit
   -h              Show this help
 
@@ -111,6 +114,10 @@ func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 			o.strict = true
 		case a == "--dash":
 			o.dash = true
+		case a == "--review":
+			o.review = true
+		case a == "--no-review":
+			o.noReview = true
 		case a == "--no-recurse":
 			o.maxDepth = 1
 		case a == "--max-depth":
@@ -286,17 +293,24 @@ func run(argv []string, stdout, stderr *os.File) int {
 		}
 	}()
 
+	stopKeys := func() {}
 	var disp *Display
-	if tty && !o.quiet && len(w.Files) > 0 {
+	if tty && len(w.Files) > 0 {
 		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes, o.dir, mode)
 		if o.dash {
 			disp.view.Store(viewDash)
 		}
 		disp.Run()
-		go watchKeys(ctx, disp, stop)
+		// The key watcher gets its own cancellation, separate from the run's.
+		// Two readers on one terminal means whoever blocks on it first takes
+		// the keystroke, so the watcher has to be shut down before the review
+		// screen opens rather than merely when the process exits.
+		kctx, kstop := context.WithCancel(ctx)
+		stopKeys = kstop
+		go watchKeys(kctx, disp, stop)
 	}
 
-	if o.jobs > 1 && !o.quiet {
+	if o.jobs > 1 {
 		line := fmt.Sprintf("Hashing with %d parallel workers...", o.jobs)
 		if disp != nil {
 			disp.Commit([]string{line})
@@ -336,9 +350,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 				continue // never reached; counted below
 			}
 			counts.Add(nv)
-			if !o.quiet {
-				emit(nv.Render(c))
-			}
+			emit(nv.Render(c))
 		}
 	}
 	// Anything still buffered belongs to an interrupted run: its index never
@@ -354,21 +366,35 @@ func run(argv []string, stdout, stderr *os.File) int {
 			continue
 		}
 		counts.Add(v)
-		if !o.quiet {
-			emit(v.Render(c))
-		}
+		emit(v.Render(c))
 	}
 	counts.Unreached = len(w.Files) - counts.Scanned
 
 	if disp != nil {
 		disp.Close()
 	}
+	// Released before anything else may want the terminal.
+	stopKeys()
 	signal.Stop(sigc)
 
 	fmt.Fprintln(stdout)
 	counts.Write(stdout, c, o.create, int64(time.Since(start).Seconds()))
 
 	rc := counts.ExitCode(w.Err != nil, interrupted.Load(), o.strict, o.create)
+
+	// Opened only for a terminal, and never when the run was stopped: an
+	// interrupted scan's problem list is a partial one, and holding the
+	// terminal open on it invites reading it as complete. A pipe, a
+	// redirected log and a script all take the path they always took.
+	wantReview := (o.review || o.dash) && !o.noReview
+	if tty && wantReview && len(counts.Failures) > 0 && !interrupted.Load() {
+		defer runReview(stdout, c, o.dir, counts.Failures)
+	} else if tty && !wantReview && len(counts.Failures) > 0 && !interrupted.Load() {
+		defer fmt.Fprintf(stdout, "%s\n",
+			c.dim(fmt.Sprintf("Re-run with --review to step through the %d problems above.",
+				len(counts.Failures))))
+	}
+
 	switch rc {
 	case 0:
 		fmt.Fprintln(stdout, c.green("✓ Completed successfully"))

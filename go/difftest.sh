@@ -53,8 +53,11 @@ FAIL=0
 #   workers  a parallel-only banner line
 #   KEYS     the Go build adds interactive key bindings the shell one has no
 #            way to offer; the block is new help text, not changed behavior
-#   --dash   likewise: a view the shell build cannot render, so its help line
-#            has no counterpart to differ from
+#   Go-only flags
+#            --dash, --review and --no-review drive views the shell build cannot
+#            render, so their help lines have no counterpart to differ from.
+#            Listed one by one rather than matched by pattern, so adding a flag
+#            to the Go build is a deliberate act here too.
 #   version  the two builds report different versions, by design
 #   colors   stripped from BOTH streams. The shell build emits colour escapes
 #            whether or not its output is a terminal, so a redirected log picks
@@ -66,6 +69,8 @@ norm() {
         -e '/parallel workers\.\.\./d' \
         -e '/^KEYS (interactive runs):/,/^$/d' \
         -e '/^  --dash /d' \
+        -e '/^  --review /d' \
+        -e '/^  --no-review /d' \
         -e 's/^treecheck [0-9].*/treecheck VERSION/' \
         -e 's/\x1b\[[0-9;]*m//g'
 }

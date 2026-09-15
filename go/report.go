@@ -23,10 +23,22 @@ type Counters struct {
 
 	MismatchPaths []string
 	IOErrPaths    []string
+
+	// Every failure in full, for the review screen. The recap above caps how
+	// many paths it prints; this is uncapped because the screen exists to go
+	// through them one at a time.
+	Failures []Failure
 }
 
 func (n *Counters) Add(v Verdict) {
 	n.Scanned++
+	switch v.Outcome {
+	case OutcomeMismatch, OutcomeIOError, OutcomeMissing:
+		n.Failures = append(n.Failures, Failure{
+			Path: v.Path, Token: v.Token, Outcome: v.Outcome, Detail: v.Detail,
+			Err: v.Err, Recorded: v.Recorded, Computed: v.Computed, Size: v.Size,
+		})
+	}
 	if v.Created {
 		n.Created++
 	}

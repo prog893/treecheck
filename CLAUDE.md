@@ -261,6 +261,13 @@ and `bin/treecheck` is what `brew install` gets.
   passing on one says little about the other.
 - `go/difftest.sh` is covered by the shellcheck workflow alongside
   `bin/treecheck`.
+- Interactive views (`--dash`, `--review`) are gated on stdout being a
+  terminal, and every one of them must leave piped output byte-identical to a
+  plain run. That is checked directly, not assumed: a view that leaks an escape
+  sequence into a redirected log has broken the tool's only output contract.
+- Only one thing may read `/dev/tty` at a time. The live display's key watcher
+  and the review screen both do, so the watcher is shut down before the review
+  opens; two blocked readers means whichever got there first eats the keystroke.
 
 Changes to behavior land in the shell version first, or in both. A Go-only
 change to something the shell version also does will fail the differential,

@@ -43,6 +43,14 @@ type Verdict struct {
 	// outcome: a creation that failed its read-back is still a creation.
 	Created bool
 	Size    int64
+
+	// Kept for the review screen rather than for the verdict line. Err is the
+	// underlying failure, which the printed line deliberately does not carry:
+	// "file could not be read" reads the same for a permissions problem and a
+	// failing disk, and telling those apart is the whole question when
+	// something is wrong.
+	Err                error
+	Recorded, Computed string
 }
 
 // Render lays out the verdict line and any detail beneath it. Detail is

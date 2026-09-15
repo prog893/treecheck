@@ -108,6 +108,7 @@ func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog pro
 		}
 		v.Token, v.Outcome = TokenIOError, OutcomeIOError
 		v.Detail = []string{"sidecar could not be read"}
+		v.Err = err
 		return v
 	}
 	if stored == "" {
@@ -128,6 +129,7 @@ func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog pro
 		}
 		v.Token, v.Outcome = TokenIOError, OutcomeIOError
 		v.Detail = []string{"file could not be read"}
+		v.Err = err
 		return v
 	}
 	if strings.EqualFold(stored, current) {
@@ -136,6 +138,7 @@ func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog pro
 	}
 	v.Token, v.Outcome = TokenMismatch, OutcomeMismatch
 	v.Detail = []string{"recorded " + stored, "now      " + current}
+	v.Recorded, v.Computed = stored, current
 	return v
 }
 

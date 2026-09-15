@@ -76,6 +76,47 @@ pane combination at eight terminal sizes and asserts no row exceeds the screen
 width and no frame exceeds its height, because a row one cell too wide wraps and
 shifts every row below it.
 
+## Reviewing the problems
+
+`--review` holds the terminal open when the run ends and steps through
+everything that failed, one at a time. `--dash` implies it. Neither does
+anything unless stdout is a terminal, and neither runs after an interrupted
+scan, whose problem list is partial and should not be read as complete.
+
+```
+┌─ problems · 2 mismatched · 1 io · 2 no usable sidecar ──────────────────────┐
+│  MISMATCH edited.mov                                                        │
+│  missing  empty.mov                                                         │
+│  io-error noperm.mov                                                        │
+│▸ MISMATCH rotted.mov                                                        │
+├─ detail ────────────────────────────────────────────────────────────────────┤
+│ prob/rotted.mov                                                             │
+│                                                                             │
+│ file      20 bytes   mode -rw-r--r--   2026-09-15T14:18:33+09:00            │
+│ sidecar   65 bytes   2026-09-15T14:18:33+09:00                              │
+│                                                                             │
+│ recorded  b69ca4eef9d872f36f7dfc914eaa12a2e673b6ff305fc80f9d1e9fe18ae9df27  │
+│ computed  1e029b22e70c0e4885af6c85ee5e2e670cf38504707ae0f77e5e9acac2cd7c76  │
+│                                                                             │
+│ the file's contents changed but its timestamp did not                       │
+│ nothing rewrote this file through the filesystem                            │
+│ this is what corruption looks like: restore from a known-good copy          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+The last three lines are the reason the screen exists. A mismatch on its own
+does not say whether the data rotted or somebody edited the file, and those
+call for opposite responses: restore from backup, or re-create the sidecar. The
+timestamps separate them. A file whose contents changed *and* whose mtime moved
+past the sidecar was rewritten, which is what an edit or a re-encode looks like.
+A file whose contents changed while its mtime did not was never rewritten by
+anything that updates metadata, which is the signature of decay.
+
+It is stated as evidence and its likely reading, never as a verdict: an mtime
+can be preserved deliberately (`rsync -t`, a restore from archive), so this
+narrows the question rather than answering it. The comparison carries a
+one-second tolerance, because sub-second skew is not evidence of anything.
+
 ## The test suite owns the contract
 
 `go test ./...` is the primary suite. It does not consult the shell version:
