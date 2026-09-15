@@ -241,14 +241,20 @@ func (d *Display) footerHeight() int {
 // Run drives the frame loop until Close. 20fps is fast enough that a bar reads
 // as moving and slow enough that the cost stays invisible next to hashing.
 func (d *Display) Run() {
+	// Started synchronously, before the caller launches anything that reads
+	// the terminal. Start asks the terminal where the cursor is and waits for
+	// the reply on the same input stream keystrokes arrive on, so a key
+	// watcher running concurrently takes the reply and the block falls back
+	// to pinning itself to the bottom of an otherwise empty screen.
+	//
+	// Only the log view owns a scrolling region. Starting one while the
+	// dashboard is up would scroll the primary screen behind it.
+	if d.view.Load() == viewLog {
+		d.r.Start(d.footerHeight(), d.repaint)
+	}
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		// Only the log view owns a scrolling region. Starting one while the
-		// dashboard is up would scroll the primary screen behind it.
-		if d.view.Load() == viewLog {
-			d.r.Start(d.footerHeight(), d.repaint)
-		}
 		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
 		for {
@@ -393,11 +399,28 @@ func bar(frac float64, width int) string {
 	return b.String()
 }
 
+// maxUIWidth caps how wide the interactive views draw.
+//
+// A 300-column terminal is not a reason to draw a 100-cell progress bar, or to
+// push a size column three hundred cells away from the bar it belongs to. The
+// eye cannot associate them at that distance, and every row becomes a scan rather
+// than a glance. Output that is not part of the UI, the verdict lines above,
+// still uses the full width.
+const maxUIWidth = 132
+
+func uiWidth(cols int) int {
+	if cols > maxUIWidth {
+		return maxUIWidth
+	}
+	if cols < 20 {
+		return 20
+	}
+	return cols
+}
+
 func (d *Display) frame() []string {
 	_, cols := d.r.Size()
-	if cols < 20 {
-		cols = 20
-	}
+	cols = uiWidth(cols)
 	done := d.doneFiles.Load()
 	dBytes := d.doneBytes.Load()
 	elapsed := time.Since(d.start)

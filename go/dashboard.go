@@ -67,6 +67,7 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 	if cols < 40 || rows < 8 {
 		return d.renderTooSmall(rows, cols)
 	}
+	cols = uiWidth(cols)
 	st := d.snapshot()
 
 	nWorkers := len(d.slots)
@@ -93,8 +94,12 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 
 	out := make([]string, 0, rows)
 
-	title := fmt.Sprintf("treecheck · %s · %s · %d workers",
-		truncRunes(displayPath(d.root), 40), d.mode, nWorkers)
+	workers := "workers"
+	if nWorkers == 1 {
+		workers = "worker"
+	}
+	title := fmt.Sprintf("treecheck · %s · %s · %d %s",
+		truncRunes(displayPath(d.root), 40), d.mode, nWorkers, workers)
 	out = append(out, hrule(bTL, bTR, cols, title, map[int]string{split - 1: bTT}))
 
 	left := d.recentLines(bodyH)

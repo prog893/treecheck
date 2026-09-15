@@ -164,13 +164,11 @@ type review struct {
 	c        *colors
 	out      *os.File
 	root     string
+	counts   *Counters
 	cache    map[int]forensics
 }
 
-func runReview(out *os.File, c *colors, root string, failures []Failure) {
-	if len(failures) == 0 {
-		return
-	}
+func runReview(out *os.File, c *colors, root string, failures []Failure, counts *Counters) {
 	restore, ok := rawMode(out)
 	if !ok {
 		return
@@ -179,7 +177,7 @@ func runReview(out *os.File, c *colors, root string, failures []Failure) {
 
 	rows, cols := terminalSize(out)
 	r := &review{
-		failures: failures, c: c, out: out, root: root,
+		failures: failures, c: c, out: out, root: root, counts: counts,
 		sc:    NewScreen(out, rows, cols),
 		cache: map[int]forensics{},
 	}
@@ -298,6 +296,10 @@ func (r *review) render() []string {
 		return []string{truncVisible(fmt.Sprintf(" %d problems; terminal too small to review",
 			len(r.failures)), cols)}
 	}
+	cols = uiWidth(cols)
+	if len(r.failures) == 0 {
+		return r.renderClean(rows, cols)
+	}
 
 	var mism, ioerr, missing int
 	for _, f := range r.failures {
@@ -415,5 +417,36 @@ func (r *review) detailLines(w, h int) []string {
 	if len(out) > h {
 		out = out[:h]
 	}
+	return out
+}
+
+// renderClean is what --review shows when there is nothing wrong. A run that
+// came back clean is a result, and being asked to press a key to dismiss it is
+// the point of having asked for the screen.
+func (r *review) renderClean(rows, cols int) []string {
+	n := r.counts
+	out := []string{hrule(bTL, bTR, cols, "nothing wrong", nil)}
+	out = append(out, boxRow(cols, ""))
+	out = append(out, boxRow(cols, "  "+r.c.green("every file matched its sidecar")))
+	out = append(out, boxRow(cols, ""))
+	pair := func(label, value string) string {
+		gap := cols - 6 - len(label) - len(value)
+		if gap < 1 {
+			gap = 1
+		}
+		return "  " + label + strings.Repeat(" ", gap) + value
+	}
+	out = append(out, boxRow(cols, pair("scanned", itoa(n.Scanned))))
+	out = append(out, boxRow(cols, pair("verified", itoa(n.OK))))
+	if n.Created > 0 {
+		out = append(out, boxRow(cols, pair("created", itoa(n.Created))))
+	}
+	if n.Unverified > 0 {
+		out = append(out, boxRow(cols, pair("not verified", itoa(n.Unverified))))
+	}
+	out = append(out, boxRow(cols, ""))
+	out = append(out, hrule(bLT, bRT, cols, "", nil))
+	out = append(out, boxRow(cols, r.c.dim("  [q] quit")))
+	out = append(out, hrule(bBL, bBR, cols, "", nil))
 	return out
 }

@@ -34,6 +34,7 @@ type options struct {
 	maxDepth int
 	exclude  []string
 	dash     bool
+	log      bool
 	review   bool
 	noReview bool
 }
@@ -55,9 +56,10 @@ OPTIONS:
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
   --strict        Treat missing sidecars as a failure too
-  --dash          Start in the full-screen dashboard
-  --review        Browse the problems interactively when the run ends
-  --no-review     Never do that, even after --dash
+  --dash          Full-screen dashboard (the default on a terminal)
+  --log           Scrolling verdict log with a status block instead
+  --review        Hold the terminal open at the end to look at the results
+  --no-review     Never hold it open
   -V, --version   Print version and exit
   -h              Show this help
 
@@ -114,6 +116,8 @@ func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 			o.strict = true
 		case a == "--dash":
 			o.dash = true
+		case a == "--log":
+			o.log = true
 		case a == "--review":
 			o.review = true
 		case a == "--no-review":
@@ -297,7 +301,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 	var disp *Display
 	if tty && len(w.Files) > 0 {
 		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes, o.dir, mode)
-		if o.dash {
+		if !o.log {
 			disp.view.Store(viewDash)
 		}
 		disp.Run()
@@ -306,8 +310,12 @@ func run(argv []string, stdout, stderr *os.File) int {
 		// the keystroke, so the watcher has to be shut down before the review
 		// screen opens rather than merely when the process exits.
 		kctx, kstop := context.WithCancel(ctx)
-		stopKeys = kstop
-		go watchKeys(kctx, disp, stop)
+		kdone := make(chan struct{})
+		stopKeys = func() {
+			kstop()
+			<-kdone
+		}
+		go watchKeys(kctx, disp, stop, kdone)
 	}
 
 	if o.jobs > 1 {
@@ -386,13 +394,14 @@ func run(argv []string, stdout, stderr *os.File) int {
 	// interrupted scan's problem list is a partial one, and holding the
 	// terminal open on it invites reading it as complete. A pipe, a
 	// redirected log and a script all take the path they always took.
-	wantReview := (o.review || o.dash) && !o.noReview
-	if tty && wantReview && len(counts.Failures) > 0 && !interrupted.Load() {
-		defer runReview(stdout, c, o.dir, counts.Failures)
-	} else if tty && !wantReview && len(counts.Failures) > 0 && !interrupted.Load() {
-		defer fmt.Fprintf(stdout, "%s\n",
-			c.dim(fmt.Sprintf("Re-run with --review to step through the %d problems above.",
-				len(counts.Failures))))
+	holdOpen := tty && !o.noReview && !interrupted.Load()
+	switch {
+	case holdOpen && o.review:
+		// Asked for explicitly, so it holds whatever the outcome: being told
+		// a run came back clean is a result worth stopping on.
+		defer runReview(stdout, c, o.dir, counts.Failures, &counts)
+	case holdOpen && len(counts.Failures) > 0:
+		defer runReview(stdout, c, o.dir, counts.Failures, &counts)
 	}
 
 	switch rc {

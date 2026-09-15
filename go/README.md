@@ -36,14 +36,30 @@ all thirteen are channels and struct fields:
 `is_our_tmp`, the `E2BIG` batching in `remove_tmp_dir`, and the rule against
 deriving one temp name from another all go with them.
 
+## Measured on a real volume
+
+Sustained **1.5 GiB/s** verifying a 1.8 TiB external SSD, 558 files of mixed
+BRAW, MP4 and WAV, at the default 8 workers. The shell implementation hashes
+through `/usr/bin/shasum`, a Perl script whose `Digest::SHA` does not use the
+ARMv8 SHA-2 instructions that Go's `crypto/sha256` does: 313 MiB/s per core
+against 1974 MiB/s on the same file, same digest.
+
 ## Views
 
-Two, switched with `tab` at runtime, or started in the dashboard with `--dash`.
+Two, switched with `tab` at runtime.
 
-The **log view** is the default and scrolls verdicts past a pinned status block,
-using a DECSTBM scrolling region so the block is never erased. The verdict
-stream is the product of this tool, and this view keeps it in the terminal's
-scrollback.
+The **dashboard** is the default on a terminal, because it shows what a long run
+is actually doing.
+
+The **log view** (`--log`) scrolls verdicts past a status block, using a DECSTBM
+scrolling region so the block is never erased. The verdict stream is the product
+of this tool, and this view keeps it in the terminal's scrollback.
+
+The status block does not jump to the bottom of the screen. It starts wherever
+the cursor already was, found by asking the terminal (DSR), and walks down as
+lines are committed, pinning to the bottom only once the screen is genuinely
+full. A block that pins immediately leaves a screenful of nothing between the
+header and itself on any run started near the top of an empty terminal.
 
 The **dashboard** is a full-screen, multi-pane view for watching a long run:
 the verdict stream and a statistics pane side by side, a per-worker band with
