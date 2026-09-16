@@ -206,7 +206,7 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 		right = append(
 			pane(d.c, "filter", statsW, filterH, shed(d.filterRows(statsW-2, st), filterH),
 				focus == focusStats),
-			pane(d.c, "run", statsW, runH, runRows, false)...)
+			pane(d.c, "stats", statsW, runH, runRows, false)...)
 	} else {
 		right = pane(d.c, "filter", statsW, bodyH,
 			d.statsLines(statsW-2, stable, st, done), focus == focusStats)

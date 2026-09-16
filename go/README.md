@@ -64,7 +64,7 @@ survives the screen being restored.
 │          now      b6f00f283e24783b68eb63deb8...   ││       missing sidecar          2   │
 │ ok       B002_0709_C002.mov                       ││       io errors                0   │
 │                                                   │└────────────────────────────────────┘
-│                                                   │┌─ run ──────────────────────────────┐
+│                                                   │┌─ stats ────────────────────────────┐
 │                                                   ││   files               171 / 1949   │
 │                                                   ││   data           1.1TiB / 2.8TiB   │
 │                                                   ││   elapsed                  1m02s   │
