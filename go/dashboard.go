@@ -59,15 +59,41 @@ func hrule(left, right string, cols int, title string, joins map[int]string) str
 }
 
 func boxRow(cols int, content string) string {
-	return bV + padVisible(truncVisible(content, cols-2), cols-2) + bV
+	return boxRowFocus(cols, content, nil, false)
+}
+
+// boxRowFocus draws a full-width row, colouring both side borders when the pane
+// it belongs to has focus.
+func boxRowFocus(cols int, content string, c *colors, focused bool) string {
+	body := padVisible(truncVisible(content, cols-2), cols-2)
+	l, r := bV, bV
+	if focused && c != nil {
+		l, r = c.cyan(bV), c.cyan(bV)
+	}
+	return l + body + r
 }
 
 // splitRow draws one row of a two-pane band, with the divider at a fixed column
 // so the panes stay aligned down the whole band.
 func splitRow(cols, split int, left, right string) string {
+	return splitRowFocus(cols, split, left, right, nil, false, false)
+}
+
+// splitRowFocus draws a two-pane row. The outer border on each side belongs to
+// the pane beside it, and the divider belongs to whichever pane has focus, so
+// the highlighted region encloses exactly one pane.
+func splitRowFocus(cols, split int, left, right string, c *colors, leftFocus, rightFocus bool) string {
 	l := padVisible(truncVisible(left, split-1), split-1)
 	r := padVisible(truncVisible(right, cols-split-2), cols-split-2)
-	return bV + l + bV + r + bV
+	lb, mid, rb := bV, bV, bV
+	if c != nil {
+		if leftFocus {
+			lb, mid = c.cyan(bV), c.cyan(bV)
+		} else if rightFocus {
+			mid, rb = c.cyan(bV), c.cyan(bV)
+		}
+	}
+	return lb + l + mid + r + rb
 }
 
 // renderDashboard composes the whole screen. It degrades by dropping panes
@@ -103,7 +129,11 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 	}
 
 	bodyH := rows - (1 + 1 + bandH + 1 + 1)
-	if bodyH < 3 && showBand {
+	// The band gives way well before it has to. Eight workers take nine rows,
+	// which on a short terminal leaves the body too thin to hold the counters,
+	// and a list of workers is worth less than knowing what the run found.
+	const minBody = 9
+	if bodyH < minBody && showBand {
 		showBand, bandH = false, 0
 		bodyH = rows - (1 + 1 + 1 + 1)
 	}
@@ -142,22 +172,35 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 	left := d.leftPane(bodyH, split-1, done)
 	right := d.statsLines(statsW, minInt(bodyH, bodyWithBand), st, done)
 	for i := 0; i < bodyH; i++ {
-		out = append(out, splitRow(cols, split, rowAt(left, i), rowAt(right, i)))
+		out = append(out, splitRowFocus(cols, split, rowAt(left, i), rowAt(right, i),
+			d.c, focus == focusStream, focus == focusStats))
 	}
 
 	bandJoins := map[int]string{split - 1: bBT}
 	if showBand {
+		// This rule separates the body from the band, so its halves belong to
+		// the panes above and its whole belongs to the band when the band has
+		// focus.
 		rule := hrule(bLT, bRT, cols, d.bandTitle(done), bandJoins)
 		if focus == focusBand {
 			rule = d.c.cyan(rule)
+		} else {
+			rule = colorRuleHalves(rule, split-1, d.c,
+				focus == focusStream, focus == focusStats)
 		}
 		out = append(out, rule)
 		for _, row := range band {
-			out = append(out, boxRow(cols, row))
+			out = append(out, boxRowFocus(cols, row, d.c, focus == focusBand))
 		}
-		out = append(out, hrule(bLT, bRT, cols, "", nil))
+		closing := hrule(bLT, bRT, cols, "", nil)
+		if focus == focusBand {
+			closing = d.c.cyan(closing)
+		}
+		out = append(out, closing)
 	} else {
-		out = append(out, hrule(bLT, bRT, cols, "", bandJoins))
+		out = append(out, colorRuleHalves(
+			hrule(bLT, bRT, cols, "", bandJoins), split-1, d.c,
+			focus == focusStream, focus == focusStats))
 	}
 
 	// Recorded for the page keys, which move by what is on screen.
@@ -240,10 +283,10 @@ func (d *Display) bandRows(cols int) []string {
 	// statistics pane narrows the list to the files that matter rather than
 	// only recolouring a number.
 	fs := res.counts.Failures
-	if want, filtered := d.filter(); filtered {
+	if match, filtered := d.filter(); filtered {
 		kept := make([]Failure, 0, len(fs))
 		for _, f := range fs {
-			if f.Outcome == want {
+			if match(f.Outcome) {
 				kept = append(kept, f)
 			}
 		}
@@ -396,11 +439,11 @@ func (d *Display) renderTooSmall(rows, cols int) []string {
 // recentLines is the verdict stream, newest at the bottom so it reads the way
 // a scrolling log does.
 func (d *Display) recentLines(h int) []string {
-	want, filtered := d.filter()
+	match, filtered := d.filter()
 	d.mu.Lock()
 	rec := make([]string, 0, len(d.recent))
 	for _, l := range d.recent {
-		if filtered && l.outcome != want {
+		if filtered && !match(l.outcome) {
 			continue
 		}
 		rec = append(rec, l.text)
@@ -426,6 +469,15 @@ func (d *Display) recentLines(h int) []string {
 	out := make([]string, h)
 	for i := range out {
 		out[i] = ""
+	}
+	if len(rec) == 0 && filtered {
+		// A blank pane reads as something having gone wrong. Selecting a
+		// category with nothing in it is a perfectly good answer, and saying
+		// so is the difference between a result and an apparent fault.
+		if h > 0 {
+			out[0] = " " + d.c.dim("no files in this category")
+		}
+		return out
 	}
 	for i, l := range rec {
 		out[h-len(rec)+i] = " " + l
@@ -464,20 +516,28 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 		}
 		return rowCursor(c, i == sel) + text
 	}
+	problems := st.mismatch + st.missing + st.ioerr
+	problemText := itoa(int(problems))
+	if problems > 0 {
+		problemText = c.yellow(problemText)
+	}
 	counts := []string{
-		"", itoa(int(st.ok)), mism, itoa(int(st.missing)), itoa(int(st.ioerr)),
+		itoa(int(st.doneFiles)), itoa(int(st.ok)), problemText,
+		mism, itoa(int(st.missing)), itoa(int(st.ioerr)),
 	}
 	rows := []row{{"", 2}}
 	for i, f := range statFilters {
-		label, value := f.label, counts[i]
-		if f.all {
-			value = itoa(int(st.doneFiles))
+		label := f.label
+		if f.indent {
+			// Nested under "problems", so the grouping is visible rather than
+			// something to be inferred from the order.
+			label = "  " + label
 		}
-		rows = append(rows, row{mark(i, pairIn(label, value, w-4)), 0})
+		rows = append(rows, row{mark(i, pairIn(label, counts[i], w-4)), 0})
 	}
 	rows = append(rows, row{"", 2})
 	rows = append(rows, []row{
-		{pair("files", fmt.Sprintf("%d / %d", st.doneFiles, d.total)), 0},
+		{pair("files", fmt.Sprintf("%d / %d", st.doneFiles, d.total)), 1},
 		{pair("data", fmt.Sprintf("%s / %s", humanBytes(st.doneBytes), humanBytes(d.totalBytes))), 1},
 	}...)
 	if done {
@@ -521,7 +581,8 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 // bottomLine is the progress bar while scanning and the summary afterwards,
 // each with the keys that apply in that state.
 func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
-	hint := d.hintText(done, st.paused)
+	// Half the row at most, so the bar and the summary keep somewhere to live.
+	hint := d.hintText(done, st.paused, w/2)
 	var lead string
 	if done {
 		lead = d.summaryText()
@@ -531,6 +592,7 @@ func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
 			pct = " " + d.c.yellow("PAUSED") + " "
 		}
 		barW := capAt(w-visibleLen(hint)-visibleLen(pct)-3, maxBarWidth)
+
 		if barW < 4 {
 			return truncVisible(" "+pct+hint, w)
 		}
@@ -545,34 +607,56 @@ func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
 // hintText names every key that does something right now, and only those. A
 // binding that works but is never offered may as well not exist; one that is
 // offered but does nothing is worse.
-func (d *Display) hintText(done, paused bool) string {
+func (d *Display) hintText(done, paused bool, w int) string {
 	what := "scroll"
 	switch d.focus.Load() {
 	case focusStats:
 		what = "filter"
 	case focusBand:
-		if done {
-			what = "problem"
-		} else {
-			what = "worker"
-		}
+		what = "problem"
 	}
-	keys := "[tab] focus  [↑↓] " + what + "  "
+
+	// Ordered least to most worth keeping. A narrow terminal drops hints from
+	// the front rather than truncating the row, which otherwise cuts a key
+	// name in half and leaves something like "[q" as the last thing on screen.
+	type hint struct{ full, short string }
+	hints := []hint{}
 	if !done {
-		// Only offered while there are workers to hide. After the scan the
-		// band holds the problems, which are the point of the screen.
-		if d.showBand.Load() {
-			keys += "[space] hide workers  "
-		} else {
-			keys += "[space] show workers  "
+		band := "[space] hide workers"
+		if !d.showBand.Load() {
+			band = "[space] show workers"
 		}
+		hints = append(hints, hint{band, "[space]"})
+	}
+	hints = append(hints, hint{"[tab] focus", "[tab]"})
+	hints = append(hints, hint{"[↑↓] " + what, "[↑↓]"})
+	if !done {
 		if paused {
-			keys += "[p] resume  "
+			hints = append(hints, hint{"[p] resume", "[p]"})
 		} else {
-			keys += "[p] pause  "
+			hints = append(hints, hint{"[p] pause", "[p]"})
 		}
 	}
-	return keys + "[q] quit"
+	hints = append(hints, hint{"[q] quit", "[q]"})
+
+	// Full labels if they fit, short ones if they do not, then shed from the
+	// front until what is left fits. Quit is last in the list, so it is the
+	// one thing that always survives.
+	join := func(parts []string) string { return strings.Join(parts, "  ") }
+	full := make([]string, len(hints))
+	short := make([]string, len(hints))
+	for i, h := range hints {
+		full[i], short[i] = h.full, h.short
+	}
+	if visibleLen(join(full)) <= w {
+		return join(full)
+	}
+	for i := 0; i < len(short); i++ {
+		if candidate := join(short[i:]); visibleLen(candidate) <= w {
+			return candidate
+		}
+	}
+	return short[len(short)-1]
 }
 
 // Marks, one role each, so a reader never has to work out which is which:

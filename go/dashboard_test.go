@@ -15,7 +15,13 @@ const (
 // fakeDisplay builds a Display with fixed state, so the layout can be rendered
 // and asserted without running a scan. Every field the panes read is set here.
 func fakeDisplay(jobs int) *Display {
-	d := NewDisplay(NewRenderer(os.Stdout), newColors(false), jobs, 1949, 29*tib/10,
+	// Rendered, never painted: tests that exercise the key handlers reach
+	// repaint, and a renderer pointed at stdout scribbles over the test output.
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		panic(err)
+	}
+	d := NewDisplay(NewRenderer(devnull), newColors(false), jobs, 1949, 29*tib/10,
 		"/Volumes/Media", "Verify only", true)
 	d.start = time.Now().Add(-62 * time.Second)
 	d.doneFiles.Store(171)
@@ -170,4 +176,84 @@ func TestSparklineShape(t *testing.T) {
 func TestDashboardSnapshot(t *testing.T) {
 	d := fakeDisplay(6)
 	t.Log("\n" + strings.Join(d.renderDashboard(28, 96), "\n"))
+}
+
+// TestHintsNeverTruncate: a narrow terminal must shed hints, not cut one in
+// half. "[q" as the last thing on screen is worse than no hint at all.
+func TestHintsNeverTruncate(t *testing.T) {
+	for _, w := range []int{120, 90, 70, 54, 40, 24, 12, 6} {
+		for _, done := range []bool{false, true} {
+			d := fakeDisplay(4)
+			d.done.Store(done)
+			if done {
+				d.res = results{counts: &Counters{}}
+			}
+			got := d.hintText(done, false, w)
+			if visibleLen(got) > w && w >= 6 {
+				t.Errorf("w=%d done=%v: hint is %d wide: %q",
+					w, done, visibleLen(got), got)
+			}
+			// Quit survives every width, because it is the one key a reader
+			// cannot do without.
+			if !strings.Contains(got, "[q") {
+				t.Errorf("w=%d done=%v: quit hint was shed: %q", w, done, got)
+			}
+			// Whatever survives is whole.
+			for _, part := range strings.Fields(got) {
+				if strings.HasPrefix(part, "[") && !strings.Contains(part, "]") {
+					t.Errorf("w=%d: hint cut mid-key: %q", w, got)
+				}
+			}
+		}
+	}
+}
+
+// TestFilterResetsStreamScroll pins a confusing jump: the stream offset is
+// counted from the newest line, so carrying it across a filter change pointed
+// it at an unrelated place in a list of a different length. The stream
+// appeared to leap, or to empty itself, with nothing on screen explaining why.
+func TestFilterResetsStreamScroll(t *testing.T) {
+	d := fakeDisplay(4)
+	for i := 0; i < 50; i++ {
+		d.recent = append(d.recent, recentLine{OutcomeOK, "ok       f" + itoa(i)})
+	}
+	d.focus.Store(focusStream)
+	d.Scroll(-20)
+	if d.streamOff.Load() == 0 {
+		t.Fatal("stream did not scroll")
+	}
+	d.focus.Store(focusStats)
+	d.Scroll(1)
+	if got := d.streamOff.Load(); got != 0 {
+		t.Errorf("stream offset survived a filter change: %d", got)
+	}
+}
+
+// TestBandNotFocusableWhileScanning: worker rows have nothing to select and
+// nothing to scroll, so offering focus for them is a stop where the keys do
+// nothing.
+func TestBandNotFocusableWhileScanning(t *testing.T) {
+	d := fakeDisplay(4)
+	if d.focusable(focusBand) {
+		t.Error("worker band should not take focus during a scan")
+	}
+	d.done.Store(true)
+	d.res = results{counts: &Counters{}}
+	if d.focusable(focusBand) {
+		t.Error("an empty problem band should not take focus")
+	}
+	d.res = results{counts: &Counters{Failures: []Failure{{Path: "a"}}}}
+	if !d.focusable(focusBand) {
+		t.Error("a band holding problems should take focus")
+	}
+	// Cycling never parks on a pane that cannot take focus.
+	for i := 0; i < 8; i++ {
+		d2 := fakeDisplay(4)
+		for j := 0; j <= i; j++ {
+			d2.CycleFocus()
+		}
+		if f := d2.focus.Load(); !d2.focusable(f) {
+			t.Fatalf("focus landed on unfocusable pane %d", f)
+		}
+	}
 }

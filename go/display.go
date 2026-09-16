@@ -341,7 +341,17 @@ func (d *Display) Run() {
 // terminal from one to the other rather than layering them.
 func (d *Display) repaint() {
 	if d.dash {
-		rows, cols := d.r.Size()
+		// Asked of the terminal every frame, not cached.
+		//
+		// The scrolling view learns about a resize from SIGWINCH, which is
+		// registered by Renderer.Start; the full-screen view never calls
+		// Start, so it had no handler at all and went on drawing at whatever
+		// size the terminal happened to be when the process began. Resizing
+		// the window left the frame at the old geometry: borders off the edge
+		// of the screen, rows from the taller frame stranded below the shorter
+		// one. An ioctl per frame at twenty frames a second costs nothing
+		// next to hashing, and needs no signal handling to get right.
+		rows, cols := terminalSize(d.r.out)
 		d.mu.Lock()
 		sc := d.screen
 		fresh := sc == nil
@@ -643,18 +653,38 @@ const (
 	focusCount
 )
 
-// statFilters are the counters the statistics pane offers, in the order they
-// are drawn. The first is "everything", so there is always a way back.
+// statFilters are the counters the statistics pane offers, in the order drawn.
+//
+// "everything" is first so there is always a way back, and "problems" groups
+// the three failing outcomes above its own subcategories. Reading "5 problems"
+// and then having to add three numbers together to check is the sort of
+// arithmetic a summary exists to save, and wanting everything that went wrong
+// without caring how it went wrong is the common case on a large volume.
 var statFilters = []struct {
-	label string
-	all   bool
-	out   Outcome
+	label  string
+	indent bool
+	// match reports whether an outcome belongs to this category. Nil means
+	// everything, which is not the same as a predicate that always returns
+	// true: it also means "apply no filter at all".
+	match func(Outcome) bool
 }{
-	{label: "everything", all: true},
-	{label: "verified", out: OutcomeOK},
-	{label: "mismatched", out: OutcomeMismatch},
-	{label: "missing", out: OutcomeMissing},
-	{label: "io errors", out: OutcomeIOError},
+	{label: "everything"},
+	{label: "verified", match: func(o Outcome) bool { return o == OutcomeOK }},
+	{label: "problems", match: isProblem},
+	{label: "mismatched", indent: true, match: func(o Outcome) bool { return o == OutcomeMismatch }},
+	{label: "missing", indent: true, match: func(o Outcome) bool { return o == OutcomeMissing }},
+	{label: "io errors", indent: true, match: func(o Outcome) bool { return o == OutcomeIOError }},
+}
+
+// isProblem is every outcome that means something needs attention. Unverified
+// is deliberately not one: a sidecar written but not read back is a thing the
+// run chose not to check, not a thing it found wrong.
+func isProblem(o Outcome) bool {
+	switch o {
+	case OutcomeMismatch, OutcomeMissing, OutcomeIOError:
+		return true
+	}
+	return false
 }
 
 // CycleFocus moves the arrow keys to the next pane. The band is skipped while
@@ -682,7 +712,10 @@ func (d *Display) focusable(f int32) bool {
 			return false
 		}
 		if !d.done.Load() {
-			return len(d.slots) > 0
+			// Worker rows have nothing to select and nothing to scroll: they
+			// are as long as the worker count and change on their own. A
+			// focus stop whose keys do nothing is worse than one pane fewer.
+			return false
 		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -715,6 +748,13 @@ func (d *Display) Scroll(n int) {
 		if int(sel) >= len(statFilters) {
 			sel = int32(len(statFilters) - 1)
 		}
+		if sel != d.statSel.Load() {
+			// Back to the newest line. A filter changes how many lines exist,
+			// so an offset carried over from the previous one points at
+			// nothing in particular: the stream appeared to jump, or to empty
+			// itself, with no visible cause.
+			d.streamOff.Store(0)
+		}
 		d.statSel.Store(sel)
 	case focusBand:
 		d.selectBy(n, false)
@@ -740,6 +780,7 @@ func (d *Display) ScrollHome() {
 	switch d.focus.Load() {
 	case focusStats:
 		d.statSel.Store(0)
+		d.streamOff.Store(0)
 	case focusBand:
 		d.selectBy(0, true)
 		return
@@ -756,6 +797,7 @@ func (d *Display) ScrollEnd() {
 	switch d.focus.Load() {
 	case focusStats:
 		d.statSel.Store(int32(len(statFilters) - 1))
+		d.streamOff.Store(0)
 	case focusBand:
 		d.selectBy(1<<30, true)
 		return
@@ -765,9 +807,9 @@ func (d *Display) ScrollEnd() {
 	d.repaint()
 }
 
-// filter is the outcome the stream and the problem list are limited to, and
-// whether any limit applies at all.
-func (d *Display) filter() (Outcome, bool) {
+// filter is the predicate the stream and the problem list are limited to. The
+// second return says whether any limit applies.
+func (d *Display) filter() (func(Outcome) bool, bool) {
 	f := statFilters[int(d.statSel.Load())%len(statFilters)]
-	return f.out, !f.all
+	return f.match, f.match != nil
 }

@@ -113,12 +113,27 @@ Three marks, one role each, so a reader never has to work out which is which:
 | gutter space beside it | reserved for selection, once there is something to select |
 
 One set of arrow keys, doing different things depending on where focus is,
-rather than a key per pane. With the **stream** focused they scroll the verdict
-log, so a long run can be read rather than only watched. With the **counters**
-focused they pick one, which filters both the stream and the band to that
-category: selecting `mismatched` narrows the problem list to the files that
-matter instead of only recolouring a number. With the **band** focused they step
-through workers while scanning and through problems afterwards.
+rather than a key per pane. With the **stream** focused they scroll the verdict log, so a long run can be
+read rather than only watched. With the **counters** focused they pick one,
+which filters both the stream and the band to that category. With the **band**
+focused, once the scan has finished, they step through the problems.
+
+The counters nest, so a category can be picked at whatever level the question
+is asked at:
+
+```
+   everything              48
+   verified                43
+   problems                 5
+     mismatched             2
+     missing                2
+     io errors              1
+```
+
+Wanting everything that went wrong without caring how is the common case on a
+large volume, and reading "5 problems" should not require adding three numbers
+together to check. Selecting a category with nothing in it says so rather than
+showing an empty pane.
 
 The hint row names what the arrows will do right now, which is also how you can
 tell where focus is.
