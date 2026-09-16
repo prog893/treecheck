@@ -1,0 +1,19 @@
+exit: 0
+--- stdout ---
+Mode: Create only | Dir: ROOT | Depth: unlimited
+
+created  ROOT/a/f2.bin
+         not read back
+created  ROOT/f1.bin
+         not read back
+
+Scanned:         2 files
+Verified:        0
+Created:         2
+Not verified:    2
+Mismatched:      0
+Missing/empty:   0
+I/O errors:      0
+Elapsed:         X
+✓ Completed successfully
+--- stderr ---

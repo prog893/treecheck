@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-const version = "2.0.0-draft"
+var version = "2.0.0"
 
 type options struct {
 	dir      string
@@ -52,8 +52,8 @@ OPTIONS:
   -f              Overwrite existing sidecars (use with -c)
   -n              Skip verification (create only; requires -c)
   -e DIRS         Exclude directories, comma-separated
-  -j N, --jobs N  Hash across N parallel workers (default: one per CPU)
-  -v              Verbose (report skipped files)
+  -j N, --jobs N  Hash across N parallel workers (default: one per CPU, up to 8)
+  -v              Verbose (report how many files were skipped)
   --no-recurse    Only the named directory (same as --max-depth 1)
   --max-depth N   Descend at most N levels
   --strict        Treat missing sidecars as a failure too
@@ -69,10 +69,12 @@ EXIT STATUS:
   2   nothing corrupt, but some files have no usable sidecar yet
   130 interrupted: only the files reported as scanned were checked
 
-KEYS (interactive runs):
-  tab             Switch between the scrolling log and the dashboard
-  space           Toggle the per-worker detail block
-  q               Stop the scan
+KEYS (on a terminal, unless --log):
+  tab             Move focus between the log, the filter and the file list
+  up, down, j, k  Scroll or select in the focused pane (PgUp, PgDn, g, G too)
+  space           Show or hide the worker rows while scanning
+  p               Pause or resume the hashing
+  q               Stop and exit
 
 EXAMPLES:
   treecheck /Volumes/Media                   Verify the whole tree
@@ -211,10 +213,10 @@ func parseArgs(argv []string, stdout, stderr *os.File) (*options, int) {
 //	32          0.136      0.230        0.042
 //
 // Eight is at or within noise of the best time in every column, and the tiny
-// file case degrades by 80% by the time the count reaches the core count. The
-// shell implementation defaulted to one worker per core because it was paying
-// a process spawn per file and needed the concurrency to hide it; nothing here
-// pays that, so the default follows the measurement instead.
+// file case degrades by 80% by the time the count reaches the core count. One
+// worker per core is the right default only for a design that pays a process
+// spawn per file and needs the concurrency to hide it; nothing here pays that,
+// so the default follows the measurement instead.
 //
 // -j overrides this, and is the right knob for a device that genuinely wants
 // more in flight.
@@ -477,8 +479,8 @@ func run(argv []string, stdout, stderr *os.File) int {
 
 // runWorkers dispatches the walk across goroutines. Every cross-goroutine fact
 // travels on a channel: there is no scratch directory, no per-record result
-// file and no event log, because workers here share an address space. The shell
-// implementation needed thirteen temporary files to carry exactly this.
+// file and no event log, because workers share an address space. Nothing is
+// written to disk except the sidecars themselves.
 func runWorkers(ctx context.Context, files []File, o *options, disp *Display, gate *pauseGate) <-chan Verdict {
 	out := make(chan Verdict, o.jobs*4)
 	type job struct {

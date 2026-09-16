@@ -30,8 +30,8 @@ func displayPath(p string) string {
 	return b.String()
 }
 
-// humanBytes renders a byte count the way the shell implementation did, to
-// one decimal place and in binary units, so output stays comparable.
+// humanBytes renders a byte count to one decimal place in binary units. The
+// format is part of the output, so logs from different runs stay comparable.
 func humanBytes(n int64) string {
 	const k = 1024
 	switch {

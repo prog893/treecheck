@@ -14,7 +14,13 @@ It never modifies, moves or deletes your data. The only files it writes are side
 brew install prog893/tap/treecheck
 ```
 
-Or run the script directly. It needs nothing beyond `bash`, `find` and `shasum`.
+Or with Go 1.22 or later:
+
+```bash
+go install github.com/prog893/treecheck/v2@latest
+```
+
+Prebuilt archives for macOS and Linux (amd64 and arm64) are attached to each [release](https://github.com/prog893/treecheck/releases). It is a single static binary with no runtime dependencies.
 
 ## Quick start
 
@@ -28,7 +34,66 @@ treecheck /Volumes/Media
 
 Recursion is the default. Pointing it at a volume means the whole volume.
 
+## On a terminal
+
+A run in a terminal takes over the screen, shows the scan as it happens, and stays up with the results when it finishes. `q` exits and hands the terminal back exactly as it was, with nothing left in the scrollback. Output meant to be kept goes through a pipe or a redirect (see [Output](#output)), and `--log` asks for that plain output in a terminal too.
+
+```
+ treecheck  /Volumes/Media                                      Verify only · 8 workers
+┌─ log ─────────────────────────────────────────────┐┌─ filter ───────────────────────────┐
+│ ok       A008_07091214_C068.braw                  ││▸  all                        171   │
+│ ok       A008_07091214_C069.braw                  ││     verified                 168   │
+│ MISMATCH A008_07091214_C070.braw                  ││     needs attention            3   │
+│          recorded 8516299eda3b1cf414041e1e69...   ││       mismatched       1 corrupt   │
+│          now      b6f00f283e24783b68eb63deb8...   ││       missing sidecar          2   │
+│ ok       B002_0709_C002.mov                       ││       io errors                0   │
+│                                                   │└────────────────────────────────────┘
+│                                                   │┌─ stats ────────────────────────────┐
+│                                                   ││   files               171 / 1949   │
+│                                                   ││   data           1.1TiB / 2.8TiB   │
+│                                                   ││   elapsed                  1m02s   │
+│                                                   ││   eta                      2h04m   │
+│                                                   ││   throughput          340.5MiB/s   │
+└───────────────────────────────────────────────────┘└────────────────────────────────────┘
+┌─ workers ────────────────────────────────────────────────────────────────────────────────┐
+│  1 ██████▏···  61%  A008_07091214_C071.braw                                     2.1GiB   │
+│  2 ██▏·······  21%  A008_07091214_C072.braw                                     4.7GiB   │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+ ██████████▎·············  43%   [space] hide workers  [tab] focus  [↑↓] scroll  [p] pause  [q] quit
+```
+
+Each worker row shows progress within its file, so a 30 GiB original shows a moving bar rather than sitting still for minutes. The percentage, the estimate and the throughput are weighted by bytes, since "171 of 1949 files" on a tree mixing multi-gigabyte originals with kilobyte metadata can mean anything between one and ninety-nine percent of the work.
+
+When the scan finishes the screen keeps its shape. The outcome joins the header, the band lists the files that need attention, and the left pane shows the evidence for the selected one.
+
+### Keys
+
+| key | does |
+|---|---|
+| `tab` | move focus between the log, the filter and the file list |
+| `↑ ↓` `j k` | scroll or select in the focused pane |
+| `PgUp` `PgDn` | the same, by one screenful of that pane |
+| `g` `G` | jump to the ends |
+| `space` | show or hide the worker rows, while scanning |
+| `p` | pause or resume the hashing, while scanning |
+| `q` | stop and exit, at any point; Ctrl-C does the same |
+
+The focused pane has a highlighted outline, and `▸` marks the row the keys point at. Picking a category in the filter limits both the log and the file list to it, so selecting `mismatched` shows only the files that matter. The hint row names what the arrows will do right now.
+
+Pause exists because a long verify saturates the device it is reading, which is a problem when that device is also the one an edit is playing back from. It takes effect part-way through a file. Paused time is left out of the estimate, and the throughput reading falls to zero while paused.
+
+### Evidence for each file
+
+A mismatch on its own does not say whether the data decayed or somebody edited the file, and those call for opposite responses: restore from a backup, or record a new sidecar. The detail pane separates them by timestamp:
+
+- **Contents changed and the file's mtime moved past its sidecar's.** The file was rewritten, which is what an edit, a re-encode or a restore looks like. If the change was intended, re-create the sidecar with `-c -f`.
+- **Contents changed and the mtime did not.** Nothing rewrote the file through the filesystem. That is what corruption looks like.
+
+An unreadable file is sorted the same way: mode `000` is a permissions problem, while a file that is readable by permission and still fails to read points at the device. Each reading is stated as evidence and its likely meaning, never as a verdict, because an mtime can be preserved on purpose (`rsync -t`, a restore from an archive).
+
 ## Output
+
+Piped or redirected, `treecheck` prints plain text: one line per file, then a summary.
 
 ```text
 Mode: Verify only | Dir: /Volumes/Media | Depth: unlimited
@@ -53,30 +118,13 @@ Elapsed:         4m12s
 ERROR: Completed with errors
 ```
 
-Files are visited in sorted order, so two completed runs over the same tree
-visit files in the same order and can be diffed against each other once the
-`Elapsed:` line, which is wall clock, is normalized. An interrupted run stops
-wherever it got to, so its counters and recap cover only part of the tree and
-do not line up against a full run. Ordering the walk needs a
-`sort` that reads NUL-separated records (`sort -z`), which is not POSIX. It is
-probed once at startup; where it is missing, the walk runs in filesystem order
-instead and says so on stderr. Nothing else about the run changes.
+Files are listed in sorted byte order however many workers run, so two completed runs over the same tree can be diffed once the `Elapsed:` line is normalized. An interrupted run stops wherever it got to, so its counters cover only part of the tree.
 
-Each line is an outcome in a fixed column, then the path. The tokens are
-`ok`, `created`, `MISMATCH`, `missing`, `io-error` and `skipped`, so a run can
-be read down that column or filtered with `grep '^MISMATCH'`. Anything worth
-adding, the two hashes behind a mismatch or the reason behind an I/O error,
-goes on indented lines underneath.
+Each line is an outcome in a fixed column, then the path. The tokens are `ok`, `created`, `MISMATCH`, `missing`, `io-error` and `skipped`, so a run can be read down that column or filtered with `grep '^MISMATCH'`. Details, such as the two hashes behind a mismatch or the reason for an I/O error, go on indented lines underneath.
 
-`Mismatched` and `I/O errors` are each followed by the files behind them,
-capped at twenty per category. Knowing that one file out of nine thousand is
-corrupt is useless without knowing which one, and that answer should not
-require going back through the log. `Missing/empty` gets no such list: on a
-fresh tree it is every file, and the fix is `-c` rather than a name.
+`Mismatched` and `I/O errors` are each followed by the files behind them, capped at twenty per category. `Missing/empty` gets no such list: on a fresh tree it is every file, and the fix is `-c` rather than a name.
 
-Control bytes in a filename are replaced with `?` for display. A name is
-untrusted input, and one carrying terminal escapes could otherwise rewrite the
-report about itself.
+Control bytes in a filename are replaced with `?` for display. A name is untrusted input, and one carrying terminal escapes could otherwise rewrite the report about itself. The same goes for a sidecar's contents: anything that is not a 64-character hex digest is treated as no sidecar, and none of its bytes are printed.
 
 Each outcome is counted separately, because they mean very different things:
 
@@ -88,12 +136,7 @@ Each outcome is counted separately, because they mean very different things:
 | **Not verified** | Create mode with `-n`: a sidecar was written but never read back |
 | **I/O errors** | The file or its sidecar could not be read, or the sidecar could not be written |
 
-For a sidecar that already existed, `Verified` means the file was read and
-hashed and the result matched, and the per-file line reads `ok`. For one this
-run just created, it means the sidecar was read back and matched the digest
-written to it, and the line reads `created`. Creation hashes the file once; a
-sidecar recorded for a file that is being written to concurrently can still go
-stale, the same as one recorded a moment before the write.
+For a sidecar that already existed, `Verified` means the file was read and hashed and the result matched, and the line reads `ok`. For one this run just created, it means the sidecar was read back and matched the digest written to it, and the line reads `created`. Creation reads each file once.
 
 `Mismatched` and `I/O errors` are deliberately distinct. A mismatch means the bytes changed. An I/O error means the drive would not hand them over, which points at the hardware rather than at the data.
 
@@ -106,19 +149,14 @@ stale, the same as one recorded a moment before the write.
 130 interrupted: only the files reported as scanned were checked
 ```
 
-Status 130 is what an interrupted run returns. Ctrl-C stops the scan rather
-than abandoning it: the summary reports the counters for the files actually
-reached, and an interrupted run never reports the clean verdict, whatever
-those counters say. A `Not reached` line accounts for the files the run never
-got to, and is omitted when the signal happened to arrive after the last one
-had already been checked.
+The exit status is the same whether or not the output is a terminal.
+
+Ctrl-C (or `q`) stops the scan rather than abandoning it, and an interrupted run never reports the clean verdict. A `Not reached` line accounts for the files the run never got to.
 
 Status 1 means the run could not confirm your data is intact. That covers three different situations: contents that changed, files the drive would not return, and a tree that could not be fully walked. Only the first is evidence of corruption, so read the counters rather than the exit code alone when diagnosing.
 
-So this does what you would expect:
-
 ```bash
-treecheck /Volumes/Media && echo "all good"
+treecheck /Volumes/Media > /dev/null && echo "all good"
 ```
 
 Exit code 2 keeps "something needs looking at" separate from "you added new files that need hashing", which matters when running this from cron. Pass `--strict` to treat missing sidecars as a failure too.
@@ -130,11 +168,14 @@ Exit code 2 keeps "something needs looking at" separate from "you added new file
 -f              Overwrite existing sidecars (use with -c)
 -n              Skip verification (create only; requires -c)
 -e DIRS         Exclude directories, comma-separated
--j N, --jobs N  Hash across N parallel workers (default: one per CPU)
--v              Verbose (report skipped files)
+-j N, --jobs N  Hash across N parallel workers (default: one per CPU, up to 8)
+-v              Verbose (report how many files were skipped)
 --no-recurse    Only the named directory (same as --max-depth 1)
 --max-depth N   Descend at most N levels
 --strict        Treat missing sidecars as a failure too
+--log           Print verdicts to stdout instead of taking over the screen
+--review        With --log, show the results view when the run ends
+--no-review     Never show the results view
 -V, --version   Print version and exit
 -h              Show this help
 ```
@@ -148,70 +189,21 @@ Mode combinations:
 | `-c -n` | Create only, skip verification |
 | `-n` alone | Nothing to do, exits with a message |
 
-## Progress
+`-e` excludes directories by whole name at any depth: `-e cache` skips `cache/` and `a/cache/`, but not `precache/` or a file named `cache.bin`.
 
-On an interactive terminal the parallel engine shows live progress: completed
-verdicts scroll above a block with one row per worker, and a summary row
-carrying the file count, how far along the run is, bytes done out of bytes
-total, elapsed time, throughput and an estimate of the time remaining.
+The default of at most eight workers is measured rather than guessed. One worker hashes at roughly 2 GiB/s, so eight already outpace most single devices, and more only contend for the disk; on a tree of small files the core count was 80% slower than eight on a 24-core machine. `-j` overrides it for devices that genuinely want more in flight.
 
-```text
-  [ 1] /Volumes/Media/Coaster Shimokita Fest/BMD/A008_07091214_C071.braw
-  [ 2] ...aigan Brewing/R5C Internal/A007C118_2608294V_CANON.CRM
-  [ 3] /Volumes/Media/Chiba Ocean Broll/BMD/A012_10221001_C041.braw
-  [ 4] (idle)
- / 171/1949 42% 1.2TiB/2.9TiB 11m03s 340.5MiB/s eta 2h04m
-```
+## Performance
 
-The block redraws four times a second, as one write per frame, repainting only
-the rows whose text changed: between verdicts that is the summary row alone,
-while the worker rows are left untouched. Drawing row by row lets the terminal
-show a half-updated frame, which reads as flicker, and repainting a row that
-has not changed costs a repaint for nothing. The cursor is hidden for the
-duration, since otherwise it is visibly walked up and down the block on every
-frame, and restored on exit including after an interrupt.
+Hashing uses Go's `crypto/sha256`, which uses the CPU's SHA-2 instructions where present, and runs in-process with no per-file process start. Measured on an Apple M2 Ultra:
 
-A file holds its row until it finishes, so rows stay put instead of
-reshuffling every time a neighbour completes. A path too wide for the terminal
-keeps its tail, which is where the filename is, and is marked with a leading
-ellipsis. The block is capped to what fits above the summary row, with any
-remaining worker slots counted rather than drawn.
+| Setup | Throughput |
+|---|---|
+| single core, one 2 GiB file | about 1.9 GiB/s |
+| NVMe over a dedicated Thunderbolt 4 link, PCIe Gen 4 | peaks of 3.1 GiB/s |
+| four NVMe drives sharing one enclosure's link | 1.5 GiB/s sustained, 1.8 TiB of mixed BRAW, MP4 and WAV |
 
-The percentage and the estimate are weighted by bytes, not by file count. A
-media tree mixes multi-gigabyte originals with kilobyte metadata files, so
-"171 of 1949 files" can mean anything between one percent and ninety-nine
-percent of the actual work. Sizes come from `du`. If it is unavailable, or if
-it cannot return a size for some path the walk turned up, the status line falls
-back to counting files and drops the estimate rather than showing one it cannot
-support. A path `du` skips because it is a second link to an inode already
-counted is asked about individually first, so an ordinary hardlink does not
-cost the whole run its byte weighting. A path that still yields no size after
-that, whether it has gone, cannot be stat'd or will not read, is what triggers
-the fallback. Sizes and rates use binary units, because `du`
-reports kibibytes: a `GiB` here is 1024 MiB, not 1000 MB.
-
-Every row is truncated to a single terminal row. The width comes from
-`stty size` on the controlling terminal, falling back to `tput cols` and then
-to 80 columns, which is best effort rather than a guarantee: a terminal
-narrower than 80 columns can still wrap. A wrapped row matters because the
-block is erased by walking the cursor back up through it, and a row that
-wrapped puts part of itself beyond the cursor's reach, where it stays in the
-scrollback for the rest of the run.
-
-The status line exists only on a terminal. Piped or redirected output carries
-none of it: every verdict appears exactly once, in walk order, so it can go
-through `grep` or into a log. The final `Elapsed` line is printed either way.
-
-A verdict is one line plus any indented detail lines under it, in both
-engines. Control bytes in a filename are replaced with `?` before it is
-printed, so a name can never add lines of its own.
-
-Separately, and for a different reason, the parallel engine refuses to hash a
-path whose real name holds a newline or a `0x01` byte, and tells you to rerun
-with `-j 1`. That rule is about the format workers use to report results, not
-about the display: a newline would split a record and `0x01` is the escape
-byte a record travels with. `-j 1` needs no such format and takes those paths
-happily, printing them sanitized like any other.
+On most hardware the device, not the hashing, sets the pace.
 
 ## How it works
 
@@ -219,9 +211,9 @@ For `video.mxf`, `treecheck` writes `video.mxf.sha256` containing that file's SH
 
 One hash per file, rather than a single hash over the whole tree, is deliberate. It means one corrupted file tells you exactly which file is corrupt instead of invalidating everything around it, and it means sidecars survive being moved alongside their data.
 
-Hidden files and directories found during the walk are skipped at every level, and are never descended into. That matters on macOS volume roots, where `.Trashes`, `.DocumentRevisions-V100` and `.TemporaryItems` are unreadable: merely looking inside them makes the directory walk fail, which would otherwise be reported as a failed run.
+Hidden files and directories found during the walk are skipped at every level, and are never descended into. That matters on macOS volume roots, where `.Trashes`, `.DocumentRevisions-V100` and `.TemporaryItems` are unreadable: merely looking inside them would make the walk fail, which would otherwise be reported as a failed run. A directory that is not hidden and cannot be read does fail the run, since the files under it were never checked.
 
-The directory you name is always scanned, even if it is itself hidden, so `treecheck ~/.config` works as expected. Only hidden entries *inside* the tree are pruned.
+The directory you name is always scanned, even if it is itself hidden, so `treecheck ~/.config` works as expected.
 
 ## Things worth knowing
 
@@ -231,24 +223,15 @@ The directory you name is always scanned, even if it is itself hidden, so `treec
 
 **Every run re-reads everything.** Verifying terabytes means reading terabytes, so a full pass over a large archive takes as long as reading the whole archive.
 
-## Requirements
+## Development
 
-- `bash`
-- `shasum` (standard on macOS and Linux)
-- `find` with `-print0` support
-- standard userland: `tr`, `sed`, `rm`, `mktemp`, `wc`
-- `sort` accepting `-z`, and `mv`, for the ordered walk only; without `sort -z`
-  the walk keeps filesystem order and says so, and nothing else changes
+```bash
+go test ./...
+go test -race ./...
+go test -run TestGoldenOutput -update .   # after an intentional output change
+```
 
-Parallel hashing (the default on multi-core machines) additionally uses an
-`xargs` built with `-P`. That flag is common but not POSIX; where it is
-missing the tool says so up front and `-j 1` always works with the core set
-alone - an explicit serial run needs nothing from this tier. The live
-progress display runs only when stdout is a terminal and additionally uses
-`tail`, `head`, `awk`, `grep`, `sleep`, `stty`, `tput` and `du`. `grep` belongs
-to this tier alone. `du` supplies the byte weights behind the percentage and
-the estimate; without it the display counts files instead and drops the
-estimate.
+The golden files under `testdata/` pin the complete non-interactive output, stderr and exit status for every mode and error path. They carry forward the interface of the 1.x shell implementation, against which they were checked, so a diff there is an interface change and is reviewed as one.
 
 ## License
 

@@ -26,8 +26,8 @@ func verdictPaths(stdout string) []string {
 
 // TestWalkOrderIsDeterministic: two runs over one tree must be diffable against
 // each other, which means byte order and not whatever order the filesystem
-// hands back. The shell implementation could only promise this for piped
-// output; here the reorder buffer gives it to a terminal too.
+// hands back. The reorder buffer holds early completions, so this holds for a
+// terminal as well as for piped output.
 func TestWalkOrderIsDeterministic(t *testing.T) {
 	files := map[string]string{}
 	var want []string

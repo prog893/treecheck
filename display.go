@@ -10,9 +10,9 @@ import (
 
 // slot is one worker's view of what it is doing right now. Bytes hashed is
 // tracked per file, which is what lets a 50 GiB original show a moving bar
-// instead of a row that sits unchanged for several minutes. The shell
-// implementation could not do this at all: it shelled out to `shasum`, which
-// reports nothing until it is finished.
+// instead of a row that sits unchanged for several minutes. That needs the
+// hashing to happen in-process: an external hasher reports nothing until it
+// is finished.
 type slot struct {
 	active atomic.Bool
 	path   atomic.Value // string

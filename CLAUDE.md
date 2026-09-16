@@ -1,53 +1,27 @@
 # treecheck Development Guide
 
-A single POSIX-ish bash script at `bin/treecheck`. No build step. Three
-dependency tiers:
+A single Go program at the repository root, module
+`github.com/prog893/treecheck/v2`. Standard library only: no third-party
+dependencies, so there is no `go.sum`. It builds for macOS and Linux on amd64
+and arm64 with `CGO_ENABLED=0`, and nothing outside the binary is needed at
+run time.
 
-- Core (every run): `bash` plus `find`, `shasum`, `tr`, `sed`, `rm`,
-  `mktemp`, `wc`.
-- Ordered walk (optional, every run that can have it): a `sort` accepting
-  `-z` for NUL-separated records, plus `mv` to swap the sorted list into place.
-  `sort -z` is not POSIX. It is probed once at
-  startup. Without it the walk keeps filesystem order and the run says so on
-  stderr; nothing else changes, and no verification result depends on it.
-  Sorting is a diffability property, not a correctness one, and it describes
-  **completed** walks: an interrupted run stops at whatever point it reached,
-  so its counters, its recap and the set of files it covered are all partial
-  and are not comparable against a full run.
-- Parallel engine (`-j > 1` or auto on multi-core): an `xargs` built with
-  `-P`, which is common but not POSIX; probed before dispatching instead of
-  failing mid-walk. Worker-count detection consults `sysctl` or `nproc` with
-  a fallback to 1. An explicit `-j 1` needs nothing from this tier.
-- Interactive progress only (stdout is a terminal): `tail`, `head`, `awk`,
-  `grep`, `sleep`, `du`, `stty`, `tput`. Never used for piped output. The
-  geometry comes from `stty size` on `/dev/tty`, falling back to `tput`, then
-  to 80 columns; that last is best effort rather than a guarantee, since a
-  terminal narrower than 80 columns will still wrap and strand a row. Only the
-  width is consulted: the display is a single line, so the terminal's height
-  never enters into it.
+Versions 1.x were a bash script. It was retired in 2.0.0; its interface
+(output format, error wording, exit codes, flags) is carried forward and
+pinned by the golden files described under Testing.
 
-Sizes for the progress display come from `du -k`, not `stat`: `du -k` is
-spelled identically on BSD and GNU where `stat` needs `-f%z` on one and
-`-c%s` on the other. Those sizes are a **weighting heuristic, not a
-measurement of the work.** `du` reports allocated blocks while `shasum` hashes
-logical contents, and the two diverge in both directions: block rounding makes
-a one-byte file weigh a whole block more than it costs, a sparse file's holes
-are hashed but never allocated so it weighs less than it costs, and a second
-path to an inode `du` has already counted in that invocation comes back from
-the batch with no size at all. That last case is recovered rather than
-accepted: any path the batch could not size is asked about individually, where
-`du` reports its real allocation, so hardlinks keep their weight. Weighting is
-disabled only when that retry also yields no number, for whatever reason: the
-path has gone, or it cannot be stat'd, or the read fails. None of it affects any
-verification result. The weights exist only to make the percentage and the estimate track
-reality better than a file count does, which on a tree mixing multi-gigabyte
-originals with kilobyte metadata is a low bar. A path `du` returns nothing for
-is not treated as weighing zero: the display drops back to counting files
-rather than run against totals that omit it. Every part of that path is
-optional, and any failure leaves the display counting files.
-
-Anything a minimal container strips beyond the tier it exercises is a real
-portability break.
+| file | holds |
+|---|---|
+| `main.go` | flags, the run, worker dispatch, exit status |
+| `walk.go` | the tree walk: pruning, depth, exclusions, byte order |
+| `check.go` | per-file verify and create, sidecar parsing, hashing |
+| `report.go` | counters, the recap, the exit-code mapping |
+| `display.go`, `dashboard.go` | the full-screen view's state and layout |
+| `render.go` | the `--log` view's pinned status block |
+| `screen.go` | the alternate-screen double buffer |
+| `keys.go`, `termios_*.go` | raw terminal input, per-platform ioctl names |
+| `review.go` | per-file evidence, the results loop, key decoding |
+| `pause.go` | the pause gate |
 
 ## What this tool promises
 
@@ -69,8 +43,34 @@ serious than a silent no-op.
 
 ## Testing
 
-Never trust a change that has not been run. Every fix is verified against a
-fixture holding **all** outcome categories at once:
+Never trust a change that has not been run.
+
+```bash
+gofmt -l . && go vet ./... && go test ./... && go test -race ./...
+```
+
+`go test` asserts the contract directly:
+
+| Test | Pins |
+|---|---|
+| `TestGoldenOutput` | complete piped stdout, stderr and exit status for every mode and error path, byte for byte, in `testdata/*.golden` |
+| `TestOutcomeCategories`, `TestVerdictTokens` | the all-outcomes fixture below |
+| `TestExitCodes`, `TestStoppingIsNotFailing` | the exit-code contract |
+| `TestFailedWalkIsNotAnEmptyDirectory`, `TestHiddenDirectoryIsPruned` | walk failure versus pruning |
+| `TestCreateOnlyNeverCountsAsVerified` | `-c -n` never reports `Verified` |
+| `TestSidecarMustBeADigest`, `TestControlBytesInFilenames` | untrusted input never reaches the terminal |
+| `TestWalkOrderIsDeterministic`, `TestOrderHoldsWhenOneFileIsSlow` | byte order whatever the worker count |
+| `TestScopeFlags`, `TestExcludeDirectories`, `TestForceOverwritesOnlyWithF` | flag semantics, including near-miss names |
+| `TestDashboard*`, `TestRowsFillTheWidth`, `TestPanesDoNotShareBorders`, `TestReview*` | layout at many terminal sizes |
+| `TestDisplayConcurrency` (under `-race`) | the display's shared state |
+
+The golden files are the interface. They were recorded from output checked
+against the 1.x shell implementation on the same fixtures. A change to any of
+them is an interface change: regenerate with
+`go test -run TestGoldenOutput -update .`, and review the diff as one.
+
+The all-outcomes fixture holds every category at once, so a fix to one cannot
+pass by breaking another:
 
 | Fixture | Expected |
 |---|---|
@@ -78,204 +78,86 @@ fixture holding **all** outcome categories at once:
 | file whose contents were changed | `Mismatched` |
 | file with no sidecar | `Missing/empty` |
 | file with an empty sidecar | `Missing/empty` |
+| sidecar holding anything but a 64-character hex digest | `Missing/empty`, exit 2, none of its bytes printed |
 | file with mode `000` | `I/O errors` |
 | nested subdirectory | scanned |
 | unreadable **hidden** dir (`.Trashes`) | pruned, no error |
 | unreadable **non-hidden** dir | walk fails, exit 1 |
-| create-only run over a fresh tree (`-c -n`) | counted as `Not verified`, never as `Verified` |
-| same fixture through both engines (`-j 1` and `-j 4`) | identical summary counters, identical output except the two parallel-only lines (`Workers: N (parallel hashing)` header and `Hashing with N parallel workers...`) and the timing-dependent `Elapsed:` line, identical **stderr**, identical exit status |
-| path containing a newline or `0x01` under `-j > 1` | refused before any hashing, exit 1, message names `-j 1` |
-| a failing run under `-j > 1` | prints `Completed with errors` on stderr, not just a nonzero exit |
-| Ctrl-C at any point of a `-j > 1` run | never `Completed successfully`; reports `Interrupted`, exit 130, and no worker chatter after the prompt returns. A `Not reached` count appears when records were actually left unreached, which a signal arriving after the last one returned legitimately leaves at zero |
-| Ctrl-C during a `-j 1` run | no further file is hashed after the signal, exit 130 |
-| a **direct** `SIGTERM` to a `-j > 1` run (`kill <pid>`, not the group) | no worker survives the exit, exit 130 |
-| a mismatch or I/O error in any engine | the summary names the offending paths under their counter |
-| a sidecar holding anything but a 64-character hex digest | `Missing/empty`, exit 2, and none of its bytes reach the terminal |
-| every verdict line | an outcome token in a fixed column, then the path, with any detail indented beneath. Tokens: `ok`, `created`, `MISMATCH`, `missing`, `io-error`, `skipped` |
-| the live status line (`-t 1`) | one row, no cursor-up sequence anywhere in the stream. Capture a run through a pty and assert `ESC[1A` never appears |
-| `Created` on a fresh tree | identical under `-j 1` and `-j > 1`. Both count from the creation log, because the sequential engine reads each verdict through a command substitution and a counter incremented in that subshell never comes back |
 
-Normalize the `Elapsed:` line before diffing the two engines; it is wall
-clock and legitimately differs between runs. Compare stderr as well as
-stdout. Comparing only stdout hid a parallel run that printed its summary and
-then exited 1 with no verdict banner at all, for as long as that bug existed.
+New tests are validated by mutation: break the behavior the test names and
+confirm that test fails. Two mutations have survived before, and both were
+real findings: a rule enforced twice, and an exclusion nothing asserted.
 
-Test the interrupt **both ways**, because they exercise different code. Note
-that neither reaches the workers directly: the dispatch runs under `set -m`, so
-the worker tree sits in its own process group, and a terminal's Ctrl-C or a
-`kill -INT -$PID` reaches this script's group alone. `on_interrupt` propagating
-`SIGTERM` to `-$XPID` is what actually stops the workers in both cases, which
-matters because `xargs` neither forwards a signal to children it has already
-started nor waits for them once killed. Send a **process-group** signal
-(`set -m`, then `kill -INT -$PID`) for the Ctrl-C shape and a **direct**
-`kill -TERM $PID` for the other, and check for surviving `shasum` processes
-afterward, not just the exit status.
-A plain `kill -INT` to a background job from a non-interactive shell is
-ignored outright, so that spelling passes while real Ctrl-C is broken.
-Interrupt at several different moments, not one, and confirm that a run which
-simply finished before the signal still exits 0.
+Some things cannot be driven from `go test` and are checked through a pty
+against the built binary before a change to the terminal code lands:
 
-Confirm exit status every time, since it is a documented interface:
+- Interrupts: `SIGINT`, `SIGTERM`, `q`, and each of those while paused, all
+  exit 130 and restore the terminal. A run that finished before the signal
+  still exits 0.
+- Keys arrive with echo disabled; typing into a run must not echo.
+- Resizing mid-run in both directions, and a terminal too small for the frame.
+- The exit status of a full-screen run equals the piped one on every fixture.
+- Piped output carries no escape bytes under any flag combination.
 
-```text
-0   clean
-1   verification failed: a mismatch, an I/O error, or a failed walk
-2   nothing corrupt, but some files have no usable sidecar
-130 interrupted: only the files reported as scanned were checked
-```
+The platforms disagree about enough filesystem and terminal behavior that CI
+runs the suite on both ubuntu and macOS, and cross-builds every release target.
 
-Status 2 is the non-strict case. Under `--strict` a missing or empty sidecar
-is a failure like any other, so those runs return 1 and never 2.
+## Things that have bitten this code
 
-This contract describes **verification mode**. A create-only run (`-c -n`)
-records each new sidecar as internally not-read-back (status 4) yet still
-exits 0 when nothing is corrupt: the exit code carries only corrupt / I/O /
-walk failures, so that table row never surfaces as a nonzero exit.
-
-Check `-h` exits 0, invalid options exit 1, and that the help text and the
-README option list still agree. They have drifted apart before.
-
-## Shell traps that have bitten this script
-
-- `((counter++))` evaluates to the **pre-increment** value, so the first
-  increment from zero returns status 1 and trips `set -e`. Use assignment
-  form. This was masked for a long time because the caller ran inside an `if`,
-  which suppresses errexit for the whole call, and it surfaced the moment that
-  `if` was restructured.
-- A `find` inside a process substitution loses its exit status, and its stderr
-  is easy to discard by accident. Run the walk to a file so failure survives.
-- A bare `exec` carrying a redirection applies that redirection to the
-  **shell**, permanently, not to one command. `exec 3<&- 2>/dev/null`, written
-  to hush a close of a descriptor that might not be open, silently routed
-  every later diagnostic to `/dev/null`: a failing parallel run printed its
-  summary and then exited 1 with no `Completed with errors` and no `error()`
-  output whatsoever. Closing an unopened descriptor succeeds anyway, so the
-  suppression bought nothing. Where a redirection really is wanted around
-  `exec`, wrap it in a group: `{ exec 3<&-; } 2>/dev/null`.
-- `export -f` does not ship the function's source text. Bash re-serializes the
-  body through its own pretty-printer, which renders `$'\n'` and `$'\001'` as
-  quoted literal control characters, and the child re-parses those differently:
-  `out=${out//$'\n'/$'\001'}` replaced one newline with **two** `0x01` bytes in
-  a worker while behaving correctly in the parent. Anything an exported
-  function substitutes must come from the environment, not from an ANSI-C
-  literal at the point of use. The pattern side round-trips; the replacement
-  side does not.
-- A trap that fires while the shell is sitting inside a command substitution
-  runs **in that subshell**, so an assignment it makes is discarded and the
-  parent never sees it. An INT handler setting `INTERRUPTED=1` was therefore
-  unreliable exactly in the monitor loop, which is dense with `$(...)` calls,
-  and a Ctrl-C could be swallowed into reporting `Completed successfully` on a
-  run that had checked 52 of 1949 files. Never let a verdict depend on a flag a
-  trap sets: derive it from a fact the parent observes directly, here the
-  engine's wait status (above 128 means it died from a signal) plus the count of
-  results that actually came back.
-- `wait` interrupted by a caught signal returns **as soon as the handler has
-  run**, with a status above 128, and the child is neither exited nor reaped at
-  that point. Verify in isolation if in doubt: a trapped `TERM` makes `wait`
-  return 143 while the child is demonstrably still alive, and a second `wait`
-  collects it. Anything that must not outlive the child, cleanup above all, has
-  to keep waiting until the process is actually gone rather than trusting the
-  first return. Tests that `sleep` before checking for survivors will not catch
-  this, because the sleep is long enough for the children to die by themselves.
-- `wait` belongs in the main flow, not in the signal handler. Waiting in the
-  handler consumed the status the main flow needed, and cleaning up before the
-  workers were gone left them writing results into a deleted directory, which
-  the shell reports as "No such file or directory" after the prompt has already
-  returned.
-- Print a filename with `printf '%s'`, never `echo`. Under `xpg_echo` bash's
-  `echo` expands backslash escapes in its argument, so a name holding a literal
-  backslash-n reaches the terminal as a line break and splits a verdict in two.
-- A sidecar's contents are untrusted input as much as a filename is.
-  `tr -d '[:space:]'` strips whitespace and nothing else, so a `.sha256` file
-  can carry `ESC` into a mismatch detail line. Anything that is not a
-  64-character hex digest is not a digest: refuse it as an unusable sidecar
-  rather than comparing it, and never render its bytes.
-- Reaping `xargs` is not the same as the work being finished. It can exit while
-  a worker it started is still running, and `wait` cannot see grandchildren, so
-  the process group has to be polled with `kill -0 -- "-$XPID"` before anything
-  is cleaned up.
-- Never name a temp file by appending a suffix to another temp file's name.
-  `"$FILE_LIST.sorted"` is derivable from `$FILE_LIST`, so another process can
-  create it first and have the redirection write through its symlink; a second
-  `mktemp` costs nothing. There are no derived temp names left in the script.
-- The creation log is counted with `wc -l`, so it must hold one fixed byte per
-  creation. Writing the pathname there adds a line per newline in the name,
-  which the sequential engine accepts, and inflates `Created`.
-- A filename is untrusted input. Printing one straight to a terminal lets it
-  carry `ESC` and rewrite the report about itself, and a name that erases its
-  own `Mismatched` line is precisely the silent failure this tool exists to
-  prevent. Every path goes through `set_display_path` before output, which
-  replaces control bytes with `?`. Quoting the whole path with `%q` instead
-  would wrap every ordinary path containing a space, which on a media tree is
-  most of them. The result travels in a global rather than through `$( )`,
-  because a command substitution forks once per file; the common case is a
-  pattern match and an assignment with no subprocess. `set_display_path` is
-  exported alongside the other worker functions, since `hash_worker` calls it.
-- A live display has to be one write per frame. A `printf` per line lets the
-  terminal paint a partial frame, which is what the eye reads as flicker, so a
-  tick accumulates every verdict it is emitting plus the redrawn status line
-  into one string and writes that once. A tick with no verdict and no change to
-  the status text writes nothing at all.
-- **The status display is one line, and that is a correctness property of the
-  redraw, not a layout preference.** A single row is erased by `\r\033[K`, in
-  the same write as whatever replaces it. A multi-row block cannot be: it has to
-  be torn down by walking the cursor up through it, one write per row, and laid
-  back out afterwards, and because every verdict forces that teardown the
-  per-row diffing never gets to apply. A per-worker row naming the file in
-  flight is what made the block multi-row, and it cost a second event log, a
-  slot allocator, the terminal height, a path-fitting helper and the flicker,
-  for information that the verdicts scrolling past already carry. Do not
-  reintroduce it.
-- Hide the cursor for the duration (`\033[?25l`) or it is visibly dragged back
-  to column zero on every redraw; restore it (`\033[?25h`) on every exit path,
-  the interrupt one included, or the terminal is left without a cursor.
-- `! -path "*/.*"` filters hidden entries out of results but does **not** stop
-  `find` descending into them. Use `-name '.?*' -prune`, and note the `?`: the
-  walk starts at `.`, which a bare `.*` matches, pruning the entire tree.
-- Inside a formula, `Pathname#write` refuses to overwrite an existing file.
-  Homebrew replaces the stdlib method via `WriteMkpathExtension`, which raises
-  `"Will not overwrite #{self}"` when the path already exists
-  (`Library/Homebrew/extend/pathname/write_mkpath_extension.rb`). Ruby's own
-  `Pathname#write` and `File.write` both overwrite happily, so use `File.write`
-  when a test deliberately corrupts a fixture.
-
-## The Go draft
-
-`go/` holds a rewrite in progress. **The shell script is still the shipped
-implementation and the reference for behavior.** Nothing in `go/` is released,
-and `bin/treecheck` is what `brew install` gets.
-
-- `go test ./...` is the primary suite and asserts the documented behavior
-  directly, so it stays meaningful once the shell version is gone. Run it with
-  `-race` as well: that is the only thing exercising the display's sharing.
-- `go/difftest.sh <binary>` diffs the two implementations over identical
-  fixtures, on stdout, stderr and exit status. Any difference is a bug in the
-  Go build until it is listed in the harness's `norm()` with a reason. It is a
-  migration aid and is expected to be retired.
-- Error message wording is matched to the shell version verbatim. Nothing
-  parses these strings, but an unexplained difference in the harness costs more
-  attention than better phrasing is worth.
-- CI runs `gofmt`, `go vet`, `go build`, `go test` and `go test -race` on both
-  ubuntu and macOS, plus the differential on ubuntu. The tool's whole job is
-  filesystem behavior and the platforms disagree about enough of it that
-  passing on one says little about the other.
-- `go/difftest.sh` is covered by the shellcheck workflow alongside
-  `bin/treecheck`.
-- The full-screen view is gated on stdout being a terminal and writes nothing
-  to stdout at all; `--log` opts out of it. Every flag combination must leave
-  piped output byte-identical to a plain run. That is checked directly, not
-  assumed: a view that leaks an escape sequence into a redirected log has
-  broken the tool's only output contract.
-- Only one thing may read `/dev/tty` at a time. The live key watcher and the
-  results view both do, so the watcher is shut down, and waited for, before the
-  results view reads; two readers means whichever got there first eats the
-  keystroke. The watcher reads with a VTIME timeout through `syscall.Read`,
-  because a blocking read cannot be interrupted and `os.File.Read` reports a
-  timeout as EOF.
-
-Changes to behavior land in the shell version first, or in both. A Go-only
-change to something the shell version also does will fail the differential,
-which is the point.
+- **The full-screen view writes nothing to stdout.** It is gated on stdout
+  being a terminal, and `--log` opts out. Every flag combination must leave
+  piped output byte-identical to a plain run. A view that leaks an escape
+  sequence into a redirected log has broken the tool's only output contract.
+- **The exit status must not depend on where output goes.** A scan that
+  finished before the first frame never created a screen, the teardown
+  dereferenced it, and a terminal run died with Go's panic status 2 where a pipe
+  reported 1. `Screen` is nil-safe on every method.
+- **A deferred method call evaluates its receiver at the `defer`.**
+  `defer d.Screen().Leave()` captured the screen before it existed. Wrap it:
+  `defer func() { d.Screen().Leave() }()`.
+- **Only one reader on `/dev/tty` at a time.** The live key watcher and the
+  results view both read it; whichever blocks first takes the keystroke, and
+  the cursor-position reply to DSR arrives on the same stream. The watcher is
+  shut down, and waited for, before anything else reads.
+- **A blocking read on a terminal cannot be interrupted** by closing the
+  descriptor, so the watcher reads with termios `VMIN=0`/`VTIME`.
+  `os.File.SetReadDeadline` does not work on `/dev/tty` ("file type does not
+  support deadline").
+- **`os.File.Read` reports a zero-byte read as `io.EOF`**, and under `VTIME`
+  every timeout is a zero-byte read. Use `syscall.Read`. Treating the timeout
+  as an error made the watcher exit 100ms into the run, restoring cooked mode:
+  keys echoed and nothing responded.
+- **Termios ioctl names differ by platform.** `TIOCGETA`/`TIOCSETA` exist only
+  on the BSDs; Linux has `TCGETS`/`TCSETS`. They live in build-tagged files.
+- **Writing into a terminal's last column leaves the cursor in the pending-wrap
+  state**, and erase-to-end-of-line from there clears that column. Rows are
+  cleared only when they are short of the width (`writeRow`); otherwise the
+  right border is drawn and wiped on every row.
+- **The full-screen view has no SIGWINCH handler.** It asks the terminal for
+  its size every frame. A cached size drew the frame at the startup geometry
+  forever.
+- **Measure text by visible cells, never `len()`.** Escape sequences occupy no
+  cells, and `↑` is three bytes. Use `visibleLen`, `truncVisible`,
+  `padVisible`, and index titles by rune.
+- **One write per frame, rows diffed against the previous frame.** A write per
+  row lets the terminal paint a partial frame, which reads as flicker.
+- **Panes do not share borders.** A shared segment cannot show which of two
+  panes has focus.
+- **Readings must not move for layout reasons.** Toggling the worker rows
+  changed which statistics fit until the column was laid out against the
+  band-shown height; a finished run's readings were recomputed from the wall
+  clock until they were frozen at the end of the scan.
+- **A filename is untrusted input**, and so is a sidecar's contents. Every path
+  goes through `displayPath`; anything that is not a 64-character hex digest is
+  not a sidecar and is never printed.
+- **Hidden entries are pruned, not filtered**, so the walk never descends into
+  `.Trashes` and friends. The named root is never pruned, however it is named.
+- **Enforce a rule once.** `--max-depth` was checked by the directory prune and
+  again per file; either alone was correct, so a test could not tell when one
+  of them rotted.
+- **Inside a formula, `Pathname#write` refuses to overwrite an existing file**
+  (Homebrew's `WriteMkpathExtension`). Use `File.write` when a formula test
+  deliberately corrupts a fixture.
 
 ## Working the review
 
@@ -372,25 +254,38 @@ Quirks that have cost real time on this repo:
 
 ## Releasing
 
-`VERSION` at the top of `bin/treecheck` is the source of truth. The git tag
-and the formula URL are derived references, synchronized to it during a
-release; they are copies, not additional places where the version is chosen.
+`var version` in `main.go` is the source of truth. The git tag and the formula
+URL are copies of it, synchronized during a release. The module path carries
+the major version (`/v2`); a new major version changes it.
 
-1. Bump `VERSION`, land the change through a PR and the merge gate above.
-2. Tag `vX.Y.Z` on `main` and push the tag.
-3. In `prog893/homebrew-tap`, update the tag in `Formula/treecheck.rb`,
-   commit, and push. The formula only exists for anyone else once the tap
-   repository has the commit; a local edit is invisible to `brew update`.
-4. `brew update && brew upgrade treecheck`, then `brew test treecheck` and
+1. Bump `version`, land the change through a PR and the merge gate above.
+2. Optionally run the `release` workflow by hand (`workflow_dispatch`). It
+   builds the archives and keeps them as workflow artifacts without
+   publishing anything.
+3. Tag `vX.Y.Z` on `main` and push the tag. The `release` workflow refuses a
+   tag that does not match `version`, runs the tests, builds
+   `treecheck_X.Y.Z_{darwin,linux}_{amd64,arm64}.tar.gz` with `SHA256SUMS`, and
+   publishes a GitHub release with them.
+4. Homebrew is updated by hand and is not touched by any workflow. Copy
+   `packaging/homebrew/treecheck.rb` to `Formula/treecheck.rb` in
+   `prog893/homebrew-tap` with the new tag, commit, and push. The formula only
+   exists for anyone else once the tap repository has the commit.
+5. `brew update && brew upgrade treecheck`, then `brew test treecheck` and
    `brew audit --formula prog893/tap/treecheck`. Both must pass clean.
 
-The formula has two non-obvious requirements, both already encoded in it:
+The tap still serves 1.3.0, the last shell release, until step 4 is done for
+2.0.0. Its `head` points at `main`, so `brew install --HEAD` breaks until then:
+the 1.x formula installs `bin/treecheck`, which no longer exists.
+
+The formula has three non-obvious requirements, all encoded in the template:
 
 - **No `version` line.** Homebrew scans it from the tag, and declaring both is
   flagged as redundant.
 - **The tag is written out literally**, not interpolated as `"v#{version}"`.
   Style autocorrect sorts `url` above `version`, at which point the
   interpolation resolves to a bare `"v"` and the clone fails.
+- **It builds from source** with `depends_on "go" => :build`, so the tap needs
+  no binaries of its own.
 
 ## Publishing
 

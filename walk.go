@@ -11,12 +11,11 @@ import (
 // File is one entry the walk decided to check. Size comes from the walk's own
 // stat rather than a separate pass.
 //
-// The shell implementation had to shell out to `du -k` for this, which reports
-// allocated blocks while the hash covers logical contents. The two diverge in
-// both directions: block rounding makes a one-byte file weigh a whole block,
-// a sparse file's holes are hashed but never allocated, and a second path to
-// an already-counted inode came back with no size at all. Reading the size
-// here removes that entire class of divergence: this is the number of bytes
+// This is the logical size, not the allocated one that `du` reports. The two
+// diverge in both directions: block rounding makes a one-byte file weigh a
+// whole block, a sparse file's holes are hashed but never allocated, and `du`
+// reports a second path to an already-counted inode as having no size at
+// all. The logical size has none of those problems: it is the number of bytes
 // the hash will actually read.
 type File struct {
 	Path string

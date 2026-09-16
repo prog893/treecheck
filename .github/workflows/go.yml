@@ -12,16 +12,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    working-directory: go
-
 jobs:
   test:
     # Both, deliberately. The tool's whole job is filesystem behavior, and the
     # two platforms disagree about enough of it (permission semantics, what a
-    # filesystem accepts in a name, how an unreadable directory surfaces) that
-    # passing on one says little about the other.
+    # filesystem accepts in a name, how an unreadable directory surfaces, even
+    # the names of the terminal ioctls) that passing on one says little about
+    # the other.
     strategy:
       fail-fast: false
       matrix:
@@ -31,9 +28,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go/go.mod
+          go-version-file: go.mod
+          # No third-party dependencies, so there is no go.sum to key a cache on.
           cache: false
 
       - name: gofmt
@@ -61,21 +59,24 @@ jobs:
       - name: test -race
         run: go test -race -count=1 ./...
 
-  # The shell implementation is still the reference for behavior, so the two
-  # are diffed against each other on every change. This job is what would catch
-  # the Go build drifting away from the contract; it is expected to be retired
-  # with the shell implementation.
-  differential:
+  # Every platform a release ships for has to build, not only the two the tests
+  # run on. The terminal code names its ioctls per platform, and a missing name
+  # fails the build rather than the run.
+  cross-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go/go.mod
+          go-version-file: go.mod
           cache: false
-      - name: build
-        run: go build -o "$RUNNER_TEMP/tcgo" .
-      - name: differential against bin/treecheck
-        run: ./difftest.sh "$RUNNER_TEMP/tcgo"
+      - name: build every release target
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            echo "building $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null .
+          done

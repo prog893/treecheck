@@ -241,8 +241,8 @@ func TestControlBytesInFilenames(t *testing.T) {
 	}
 }
 
-// TestNewlineInPathIsHandled is a capability the shell implementation refused
-// outright under -j > 1, because its worker records were newline-delimited.
+// TestNewlineInPathIsHandled: a newline is a legal filename byte, and nothing
+// here delimits records with one, so such a file is checked like any other.
 func TestNewlineInPathIsHandled(t *testing.T) {
 	root := t.TempDir()
 	name := "a\nb.bin"
