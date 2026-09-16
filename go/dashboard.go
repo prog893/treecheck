@@ -174,9 +174,11 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 		bodyWithBand = 1
 	}
 
+	// Wide enough for the longest filter row, "missing sidecar" at depth two
+	// with a value beside it, so the value column stays aligned.
 	statsW := capAt(cols*2/5, maxStatsWidth)
-	if statsW < 26 {
-		statsW = 26
+	if statsW < minStatsWidth {
+		statsW = minStatsWidth
 	}
 	streamW := cols - statsW
 	if streamW < 30 {
@@ -184,18 +186,37 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 		statsW = cols - streamW
 	}
 
-	// The statistics are laid out for the height they would have with the band
+	// The readings are laid out for the height they would have with the band
 	// showing, whichever way the band is actually set. Otherwise hiding the
-	// worker rows hands the pane more room and it grows a counter or two back,
-	// so a key about workers silently changes which statistics exist.
+	// worker rows hands the column more room and it grows a reading or two
+	// back, so a key about workers silently changes which readings exist.
+	stable := minInt(bodyH, bodyWithBand)
 	left := d.leftPane(bodyH, streamW-2, done)
-	right := d.statsLines(statsW-2, minInt(bodyH, bodyWithBand), st, done)
+
+	// The right column is two boxes: the filter, which is a control and takes
+	// focus, and the run's readings, which are not and do not. One box
+	// holding both left the pane's name describing half of what was in it.
+	// A terminal too short to give the readings room of their own gets the
+	// two in one box instead.
+	filterH := len(statFilters)
+	runH := bodyH - filterH - 2
+	var right []string
+	if stable-filterH-2 >= 3 {
+		runRows := shed(d.runRows(statsW-2, st, done), stable-filterH-2)
+		right = append(
+			pane(d.c, "filter", statsW, filterH, shed(d.filterRows(statsW-2, st), filterH),
+				focus == focusStats),
+			pane(d.c, "run", statsW, runH, runRows, false)...)
+	} else {
+		right = pane(d.c, "filter", statsW, bodyH,
+			d.statsLines(statsW-2, stable, st, done), focus == focusStats)
+	}
 
 	out := make([]string, 0, rows)
 	out = append(out, d.headerLine(cols))
 	out = append(out, joinH(
 		pane(d.c, d.paneTitle(done), streamW, bodyH, left, focus == focusStream),
-		pane(d.c, "stats", statsW, bodyH, right, focus == focusStats))...)
+		right)...)
 	if showBand {
 		out = append(out, pane(d.c, d.bandTitle(done), cols, len(band), band,
 			focus == focusBand)...)
@@ -274,73 +295,81 @@ func (d *Display) recentLines(h int) []string {
 // estimate live at the bottom and are the readings you cannot reconstruct by
 // looking at the verdict stream. Instead the rows carry a priority, the
 // spacers go first, and what survives is drawn in its original order.
-func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
-	c := d.c
-	pair := func(label, value string) string { return "  " + pairIn(label, value, w-4) }
-	mism := itoa(int(st.mismatch))
-	if st.mismatch > 0 {
-		mism = c.red(mism + " corrupt")
-	}
+// statRow is one line of the right-hand column with the priority it is shed
+// at: 2 goes first, 0 is kept as long as there is any room at all.
+type statRow struct {
+	text string
+	prio int
+}
 
-	// prio 0 is kept as long as there is any room at all; 2 goes first.
-	type row struct {
-		text string
-		prio int
-	}
+// filterRows is the category tree. Every row is priority 0: it is a control,
+// and a cursor that can land on a row that was shed is a cursor the reader
+// cannot see.
+func (d *Display) filterRows(w int, st statsSnapshot) []statRow {
+	c := d.c
 	focused := d.focus.Load() == focusStats
 	sel := int(d.statSel.Load())
 	// Marked rather than merely coloured: the selected filter has to be
-	// readable at a glance from across the pane, including when the pane does
-	// not have focus and nothing is highlighted.
+	// readable at a glance, including when the pane does not have focus.
 	mark := func(i int, text string) string {
 		if i == sel && !focused {
 			return c.dim(cursorMark) + cursorGap + text
 		}
 		return rowCursor(c, i == sel) + text
 	}
-	problems := st.mismatch + st.missing + st.ioerr
-	problemText := itoa(int(problems))
-	if problems > 0 {
-		problemText = c.yellow(problemText)
+	mism := itoa(int(st.mismatch))
+	if st.mismatch > 0 {
+		mism = c.red(mism + " corrupt")
+	}
+	attention := st.mismatch + st.missing + st.ioerr
+	attentionText := itoa(int(attention))
+	if attention > 0 {
+		attentionText = c.yellow(attentionText)
 	}
 	counts := []string{
-		itoa(int(st.doneFiles)), itoa(int(st.ok)), problemText,
+		itoa(int(st.doneFiles)), itoa(int(st.ok)), attentionText,
 		mism, itoa(int(st.missing)), itoa(int(st.ioerr)),
 	}
-	rows := []row{{"", 2}}
+	rows := make([]statRow, 0, len(statFilters))
 	for i, f := range statFilters {
 		// Indented by depth, so the grouping is visible rather than something
 		// to be inferred from the order.
 		label := strings.Repeat("  ", f.depth) + f.label
-		rows = append(rows, row{mark(i, pairIn(label, counts[i], w-4)), 0})
+		rows = append(rows, statRow{mark(i, pairIn(label, counts[i], w-4)), 0})
 	}
-	rows = append(rows, row{"", 2})
-	rows = append(rows, []row{
+	return rows
+}
+
+// runRows is the readings about the run itself.
+func (d *Display) runRows(w int, st statsSnapshot, done bool) []statRow {
+	c := d.c
+	pair := func(label, value string) string { return "  " + pairIn(label, value, w-4) }
+	rows := []statRow{
 		{pair("files", fmt.Sprintf("%d / %d", st.doneFiles, d.total)), 1},
 		{pair("data", fmt.Sprintf("%s / %s", humanBytes(st.doneBytes), humanBytes(d.totalBytes))), 1},
-	}...)
+	}
 	if done {
 		// An estimate and an instantaneous rate describe work still to come.
-		// Once there is none, the honest readings are what it took and what
-		// it averaged, and a sparkline of a finished run is decoration.
-		rows = append(rows,
-			row{pair("elapsed", fmtDur(st.elapsed)), 0},
-			row{"", 2},
-			row{pair("throughput", c.cyan(humanBytes(st.average)+"/s")), 1},
-		)
-	} else {
-		rows = append(rows,
-			row{pair("elapsed", fmtDur(st.elapsed)), 1},
-			row{pair("eta", st.eta), 0},
-			row{"", 2},
-			row{pair("throughput", c.cyan(humanBytes(st.rate)+"/s")), 0},
-			row{" " + c.cyan(sparkline(st.hist, w-2)), 1},
+		// Once there is none, the readings are what it took and what it
+		// averaged, and a sparkline of a finished run is decoration.
+		return append(rows,
+			statRow{pair("elapsed", fmtDur(st.elapsed)), 0},
+			statRow{"", 2},
+			statRow{pair("throughput", c.cyan(humanBytes(st.average)+"/s")), 1},
 		)
 	}
+	return append(rows,
+		statRow{pair("elapsed", fmtDur(st.elapsed)), 1},
+		statRow{pair("eta", st.eta), 0},
+		statRow{"", 2},
+		statRow{pair("throughput", c.cyan(humanBytes(st.rate)+"/s")), 0},
+		statRow{" " + c.cyan(sparkline(st.hist, w-2)), 1},
+	)
+}
 
-	// Spacers go first, then the least load-bearing numbers, so a genuinely
-	// short terminal still shows the counters that cannot be reconstructed
-	// from anywhere else.
+// shed drops spacers first, then the least load-bearing readings, until the
+// rows fit, keeping the survivors in their original order.
+func shed(rows []statRow, h int) []string {
 	drop := len(rows) - h
 	for prio := 2; prio >= 1 && drop > 0; prio-- {
 		for i := len(rows) - 1; i >= 0 && drop > 0; i-- {
@@ -355,6 +384,16 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 		out = append(out, r.text)
 	}
 	return out
+}
+
+// statsLines is the combined column, filter and readings in one box, for a
+// terminal too short to give each its own.
+func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
+	rows := []statRow{{"", 2}}
+	rows = append(rows, d.filterRows(w, st)...)
+	rows = append(rows, statRow{"", 2})
+	rows = append(rows, d.runRows(w, st, done)...)
+	return shed(rows, h)
 }
 
 // bottomLine is the progress bar while scanning and the summary afterwards,
@@ -395,7 +434,7 @@ func (d *Display) hintText(done, paused bool, w int) string {
 	case focusStats:
 		what = "filter"
 	case focusBand:
-		what = "problem"
+		what = "file"
 	}
 
 	// Ordered least to most worth keeping. A narrow terminal drops hints from
@@ -552,7 +591,7 @@ func statusPhrase(status int) string {
 
 func (d *Display) bandTitle(done bool) string {
 	if done {
-		return "problems"
+		return "needs attention"
 	}
 	return "workers"
 }

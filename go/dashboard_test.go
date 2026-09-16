@@ -341,3 +341,26 @@ func TestEstimateIsThrottled(t *testing.T) {
 		t.Errorf("estimate changed within %v: %q then %q", etaEvery, first, got)
 	}
 }
+
+// TestFilterValuesAlign: every filter row puts its value in the same column,
+// at every width the layout allows, including the longest label.
+func TestFilterValuesAlign(t *testing.T) {
+	for _, cols := range []int{64, 70, 80, 104, 150} {
+		d := fakeDisplay(2)
+		st := d.snapshot()
+		w := capAt(cols*2/5, maxStatsWidth)
+		if w < minStatsWidth {
+			w = minStatsWidth
+		}
+		rows := d.filterRows(w-2, st)
+		end := -1
+		for _, r := range rows {
+			n := visibleLen(strings.TrimRight(r.text, " "))
+			if end == -1 {
+				end = n
+			} else if n != end {
+				t.Errorf("cols=%d: value column moved from %d to %d: %q", cols, end, n, r.text)
+			}
+		}
+	}
+}

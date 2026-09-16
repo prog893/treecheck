@@ -261,13 +261,17 @@ and `bin/treecheck` is what `brew install` gets.
   passing on one says little about the other.
 - `go/difftest.sh` is covered by the shellcheck workflow alongside
   `bin/treecheck`.
-- Interactive views (`--dash`, `--review`) are gated on stdout being a
-  terminal, and every one of them must leave piped output byte-identical to a
-  plain run. That is checked directly, not assumed: a view that leaks an escape
-  sequence into a redirected log has broken the tool's only output contract.
-- Only one thing may read `/dev/tty` at a time. The live display's key watcher
-  and the review screen both do, so the watcher is shut down before the review
-  opens; two blocked readers means whichever got there first eats the keystroke.
+- The full-screen view is gated on stdout being a terminal and writes nothing
+  to stdout at all; `--log` opts out of it. Every flag combination must leave
+  piped output byte-identical to a plain run. That is checked directly, not
+  assumed: a view that leaks an escape sequence into a redirected log has
+  broken the tool's only output contract.
+- Only one thing may read `/dev/tty` at a time. The live key watcher and the
+  results view both do, so the watcher is shut down, and waited for, before the
+  results view reads; two readers means whichever got there first eats the
+  keystroke. The watcher reads with a VTIME timeout through `syscall.Read`,
+  because a blocking read cannot be interrupted and `os.File.Read` reports a
+  timeout as EOF.
 
 Changes to behavior land in the shell version first, or in both. A Go-only
 change to something the shell version also does will fail the differential,

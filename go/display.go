@@ -554,6 +554,7 @@ func bar(frac float64, width int) string {
 const (
 	maxBarWidth   = 24
 	maxStatsWidth = 38
+	minStatsWidth = 32
 	maxPathWidth  = 72
 )
 
@@ -692,8 +693,10 @@ const (
 
 // statFilters are the counters the statistics pane offers, in the order drawn.
 //
-// "everything" is first so there is always a way back, and "problems" groups
-// the three failing outcomes above its own subcategories. Reading "5 problems"
+// "all" is first so there is always a way back, and "needs attention" groups
+// the three outcomes that want a decision above its own subcategories. It is
+// not called failures: a missing sidecar is a file nobody has checked yet, not
+// one found wrong. Reading "5 problems"
 // and then having to add three numbers together to check is the sort of
 // arithmetic a summary exists to save, and wanting everything that went wrong
 // without caring how it went wrong is the common case on a large volume.
@@ -705,11 +708,11 @@ var statFilters = []struct {
 	// true: it also means "apply no filter at all".
 	match func(Outcome) bool
 }{
-	{label: "everything", depth: 0},
+	{label: "all", depth: 0},
 	{label: "verified", depth: 1, match: func(o Outcome) bool { return o == OutcomeOK }},
-	{label: "problems", depth: 1, match: isProblem},
+	{label: "needs attention", depth: 1, match: isProblem},
 	{label: "mismatched", depth: 2, match: func(o Outcome) bool { return o == OutcomeMismatch }},
-	{label: "missing", depth: 2, match: func(o Outcome) bool { return o == OutcomeMissing }},
+	{label: "missing sidecar", depth: 2, match: func(o Outcome) bool { return o == OutcomeMissing }},
 	{label: "io errors", depth: 2, match: func(o Outcome) bool { return o == OutcomeIOError }},
 }
 
