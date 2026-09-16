@@ -48,6 +48,25 @@ type Display struct {
 	wg     sync.WaitGroup
 	screen *Screen
 
+	// The frame keeps its shape before and after the scan finishes; only what
+	// the panes hold changes. Switching to a differently shaped screen at the
+	// moment a run ends makes the reader re-find everything they were already
+	// looking at.
+	done atomic.Bool
+	// showBand toggles the lower band: worker rows while running, the problem
+	// list once finished.
+	showBand atomic.Bool
+	// wide hides the statistics pane so the verdict stream gets its width.
+	wide atomic.Bool
+	gate *pauseGate
+
+	// Results, set once when the scan finishes. Guarded by mu. Forensics are
+	// gathered when a problem is first selected rather than during the run,
+	// so a scan pays nothing for a screen it may never show.
+	res       results
+	sel       int
+	forensics map[int]forensics
+
 	// Descriptive fields for the dashboard header, fixed for the run.
 	root string
 	mode string
@@ -77,7 +96,8 @@ type statsSnapshot struct {
 	ok, mismatch, missing, ioerr int64
 	inflight                     int64
 	rate                         int64
-	elapsed                      int64
+	elapsed, wall                int64
+	paused                       bool
 	frac                         float64
 	eta                          string
 	hist                         []int64
@@ -97,6 +117,18 @@ func (d *Display) snapshot() statsSnapshot {
 		}
 	}
 	elapsed := time.Since(d.start)
+	st.wall = int64(elapsed.Seconds())
+	if d.gate != nil {
+		st.paused = d.gate.paused()
+		// Excluded from the elapsed that feeds the rate and the estimate: a
+		// run paused for ten minutes has not slowed down, and an estimate
+		// that says otherwise is worse than no estimate. The wall clock is
+		// kept separately, since that is what a watch shows.
+		elapsed -= d.gate.pausedFor()
+		if elapsed < 0 {
+			elapsed = 0
+		}
+	}
 	st.elapsed = int64(elapsed.Seconds())
 
 	// In-flight bytes count toward progress. Without them a single very large
@@ -180,6 +212,7 @@ func NewDisplay(r *Renderer, c *colors, jobs, total int, totalBytes int64, root,
 		d.slots[i] = s
 	}
 	d.expanded.Store(true)
+	d.showBand.Store(true)
 	return d
 }
 
@@ -318,8 +351,63 @@ func (d *Display) Commit(lines []string) {
 	}
 }
 
+// ToggleExpanded shows or hides the lower band.
 func (d *Display) ToggleExpanded() {
 	d.expanded.Store(!d.expanded.Load())
+	d.showBand.Store(!d.showBand.Load())
+	d.repaint()
+}
+
+// ToggleWide hands the statistics pane's width to the verdict stream.
+func (d *Display) ToggleWide() {
+	d.wide.Store(!d.wide.Load())
+	d.repaint()
+}
+
+// ShowResults moves the view into its results state without changing its shape.
+func (d *Display) ShowResults(res results) {
+	d.mu.Lock()
+	d.res = res
+	d.sel = 0
+	d.mu.Unlock()
+	d.done.Store(true)
+	d.repaint()
+}
+
+// Move steps the problem selection, and does nothing while the scan is running.
+func (d *Display) Move(n int) { d.selectBy(n, false) }
+
+func (d *Display) SelectFirst() { d.selectBy(0, true) }
+func (d *Display) SelectLast()  { d.selectBy(1<<30, true) }
+
+func (d *Display) selectBy(i int, absolute bool) {
+	if !d.done.Load() {
+		return
+	}
+	d.mu.Lock()
+	if total := len(d.res.counts.Failures); total > 0 {
+		if absolute {
+			d.sel = i
+		} else {
+			d.sel += i
+		}
+		if d.sel >= total {
+			d.sel = total - 1
+		}
+		if d.sel < 0 {
+			d.sel = 0
+		}
+	}
+	d.mu.Unlock()
+	d.repaint()
+}
+
+// TogglePause is only meaningful while the scan is running.
+func (d *Display) TogglePause() {
+	if d.done.Load() || d.gate == nil {
+		return
+	}
+	d.gate.toggle()
 	d.repaint()
 }
 

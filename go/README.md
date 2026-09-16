@@ -92,6 +92,25 @@ pane combination at eight terminal sizes and asserts no row exceeds the screen
 width and no frame exceeds its height, because a row one cell too wide wraps and
 shifts every row below it.
 
+## Keys
+
+| key | while scanning | after it finishes |
+|---|---|---|
+| `space` | show or hide the worker rows | show or hide the problem list |
+| `tab` | hand the statistics pane's width to the verdict stream | same |
+| `p` | pause the hashing | |
+| `↑ ↓` `j k` `g` `G` | | move through the problems |
+| `q` | stop and exit | exit |
+
+`q` quits at any point. Stopping a scan to look at its partial results is what
+letting it finish is for, and a key labelled quit that instead moves to another
+screen is not one. Ctrl-C behaves the same way.
+
+Pause exists because a long verify saturates the device it is reading, which is
+a problem when that device is also the one an edit is playing back from. Paused
+time is excluded from the rate and the estimate: a run paused for ten minutes
+has not slowed down, and an estimate that says otherwise is worse than none.
+
 ## Reviewing the problems
 
 `--review` holds the terminal open when the run ends and steps through

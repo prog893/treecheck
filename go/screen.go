@@ -32,7 +32,7 @@ func NewScreen(out *os.File, rows, cols int) *Screen {
 }
 
 func (s *Screen) Enter() {
-	if s.entered {
+	if s == nil || s.entered {
 		return
 	}
 	// Alternate buffer, cursor hidden, cleared.
@@ -41,8 +41,10 @@ func (s *Screen) Enter() {
 	s.prev = nil
 }
 
+// Leave is safe on a nil screen: a run short enough to finish before the
+// first frame never creates one, and every exit path still has to tear down.
 func (s *Screen) Leave() {
-	if !s.entered {
+	if s == nil || !s.entered {
 		return
 	}
 	// Restore the primary buffer and the cursor. Both, on every exit path,
@@ -55,6 +57,9 @@ func (s *Screen) Leave() {
 // Resize invalidates the cached frame: the old one describes a screen that no
 // longer exists, so every row has to be laid down again.
 func (s *Screen) Resize(rows, cols int) {
+	if s == nil {
+		return
+	}
 	// Only a real size change invalidates the frame. Clearing unconditionally
 	// would blank the screen on every repaint, which is a full repaint per
 	// frame and the flicker this buffer exists to avoid.
@@ -69,7 +74,7 @@ func (s *Screen) Resize(rows, cols int) {
 }
 
 func (s *Screen) Draw(frame []string) {
-	if !s.entered {
+	if s == nil || !s.entered {
 		return
 	}
 	if len(frame) > s.rows {

@@ -60,9 +60,12 @@ func ioctlTermios(fd uintptr, req uintptr, t *syscall.Termios) error {
 }
 
 // watchKeys reads the controlling terminal directly rather than stdin, which
-// may be a pipe, and never touches the hashing path: a key can only switch the
-// view or ask the scan to stop.
-func watchKeys(ctx context.Context, d *Display, stop func(), done chan<- struct{}) {
+// may be a pipe. It never touches the hashing path: a key can change the view,
+// pause the work, move the selection or ask to quit, and nothing else.
+//
+// One reader at a time. The terminal is a single shared resource, and two
+// blocked readers means whichever got there first takes the keystroke.
+func watchKeys(ctx context.Context, d *Display, quit func(), done chan<- struct{}) {
 	defer close(done)
 
 	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
@@ -111,13 +114,31 @@ func watchKeys(ctx context.Context, d *Display, stop func(), done chan<- struct{
 		if n == 0 {
 			continue
 		}
-		switch buf[0] {
-		case ' ':
-			d.ToggleExpanded()
-		case 'q', 'Q':
-			// The same path a signal takes: the run is stopped, not failed.
-			stop()
+		switch decodeKey(buf[:n]) {
+		case keyQuit:
+			// Quit means quit, at any point. Stopping a scan to look at its
+			// partial results is what letting it finish is for; a key labelled
+			// quit that instead moves to another screen is not one.
+			quit()
 			return
+		case keyPause:
+			d.TogglePause()
+		case keyBand:
+			d.ToggleExpanded()
+		case keyWide:
+			d.ToggleWide()
+		case keyUp:
+			d.Move(-1)
+		case keyDown:
+			d.Move(1)
+		case keyPageUp:
+			d.Move(-10)
+		case keyPageDown:
+			d.Move(10)
+		case keyHome:
+			d.SelectFirst()
+		case keyEnd:
+			d.SelectLast()
 		}
 	}
 }

@@ -50,7 +50,7 @@ type progressFn func(done int64)
 
 // hashFile computes the digest, reporting progress and honouring cancellation
 // mid-file. A 50 GiB original must not have to finish before Ctrl-C is felt.
-func hashFile(ctx context.Context, path string, buf []byte, prog progressFn) (string, error) {
+func hashFile(ctx context.Context, path string, buf []byte, prog progressFn, gate *pauseGate) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -64,6 +64,15 @@ func hashFile(ctx context.Context, path string, buf []byte, prog progressFn) (st
 		case <-ctx.Done():
 			return "", errInterrupted
 		default:
+		}
+		// Checked between reads, so a pause takes hold part-way through a
+		// large file instead of only at the next one. On a tree of
+		// multi-gigabyte originals that is the difference between pausing now
+		// and pausing in several minutes.
+		if gate != nil {
+			if err := gate.wait(ctx); err != nil {
+				return "", errInterrupted
+			}
 		}
 		n, rerr := f.Read(buf)
 		if n > 0 {
@@ -92,12 +101,12 @@ type checkOpts struct {
 // checkFile is the whole per-file decision, returning the verdict to print and
 // count. It is pure with respect to the display: nothing here writes to the
 // terminal, which is what lets the same function serve a pipe and a live view.
-func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog progressFn) Verdict {
+func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog progressFn, gate *pauseGate) Verdict {
 	v := Verdict{Path: f.Path, Size: f.Size}
 	sidecar := f.Path + hashExt
 
 	if opts.create {
-		return createPath(ctx, f, sidecar, opts, buf, prog, v)
+		return createPath(ctx, f, sidecar, opts, buf, prog, v, gate)
 	}
 
 	stored, err := readSidecar(sidecar)
@@ -122,7 +131,7 @@ func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog pro
 		return v
 	}
 
-	current, err := hashFile(ctx, f.Path, buf, prog)
+	current, err := hashFile(ctx, f.Path, buf, prog, gate)
 	if err != nil {
 		if errors.Is(err, errInterrupted) {
 			return Verdict{Path: f.Path, Size: f.Size, Token: "", Outcome: OutcomeOK}
@@ -142,7 +151,7 @@ func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog pro
 	return v
 }
 
-func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf []byte, prog progressFn, v Verdict) Verdict {
+func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf []byte, prog progressFn, v Verdict, gate *pauseGate) Verdict {
 	// An existing sidecar is honoured unless -f was given: creating is for
 	// files that have none, and overwriting one silently would destroy the
 	// only record of what the file used to hash to.
@@ -158,7 +167,7 @@ func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf
 				v.Detail = []string{"sidecar already exists, not verified"}
 				return v
 			case stored != "":
-				current, herr := hashFile(ctx, f.Path, buf, prog)
+				current, herr := hashFile(ctx, f.Path, buf, prog, gate)
 				if herr != nil {
 					if errors.Is(herr, errInterrupted) {
 						return Verdict{Path: f.Path, Size: f.Size}
@@ -184,7 +193,7 @@ func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf
 
 	// A file that cannot be read must not get a sidecar, or an empty hash
 	// would be recorded as though it were the truth.
-	current, err := hashFile(ctx, f.Path, buf, prog)
+	current, err := hashFile(ctx, f.Path, buf, prog, gate)
 	if err != nil {
 		if errors.Is(err, errInterrupted) {
 			return Verdict{Path: f.Path, Size: f.Size}

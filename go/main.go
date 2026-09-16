@@ -306,11 +306,20 @@ func run(argv []string, stdout, stderr *os.File) int {
 	//
 	// The flag is read by the parent that observes the result, never by a
 	// handler that might be running somewhere its writes are discarded.
+	gate := &pauseGate{}
+	// Stopping early, however it was asked for, ends the run: it does not
+	// divert into the results view. Ctrl-C means stop, and a q labelled quit
+	// that instead moves to another screen is not one. Both also leave the
+	// results partial, which is not a list worth holding a terminal open on.
 	var interrupted atomic.Bool
 	stop := func() {
+		// A paused run must still stop: release the gate before cancelling so
+		// nothing is left blocked on it while the rest waits for the workers.
+		gate.release()
 		interrupted.Store(true)
 		cancel()
 	}
+
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -324,6 +333,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 	if tty && len(w.Files) > 0 {
 		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes,
 			o.dir, mode, fullScreen)
+		disp.gate = gate
 		disp.Run()
 		// The key watcher gets its own cancellation, separate from the run's.
 		// Two readers on one terminal means whoever blocks on it first takes
@@ -347,7 +357,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 		}
 	}
 
-	verdicts := runWorkers(ctx, w.Files, o, disp)
+	verdicts := runWorkers(ctx, w.Files, o, disp, gate)
 
 	// Emitted in walk order, always, whether the destination is a terminal or
 	// a pipe. Results arrive in completion order; a reorder buffer holds the
@@ -422,14 +432,14 @@ func run(argv []string, stdout, stderr *os.File) int {
 	// it found, and a screen that vanishes the moment it has something to say
 	// makes you re-run to read it.
 	if fullScreen && disp != nil {
-		res := results{
-			counts:  &counts,
-			root:    o.dir,
-			mode:    mode,
-			elapsed: elapsed,
-			status:  rc,
+		if interrupted.Load() || o.noReview {
+			// Asked to leave, so leave. The screen is handed back untouched.
+			disp.Screen().Leave()
+			return rc
 		}
-		runReview(stdout, c, disp.Screen(), res)
+		runResults(disp, results{
+			counts: &counts, root: o.dir, mode: mode, elapsed: elapsed, status: rc,
+		})
 		return rc
 	}
 
@@ -447,7 +457,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 	// On a terminal in --log mode the results view is opt-in, since the run
 	// has already printed everything it knows.
 	if tty && !o.noReview && !interrupted.Load() && (o.review || len(counts.Failures) > 0) {
-		runReview(stdout, c, nil, results{
+		runReviewStandalone(stdout, c, o.jobs, results{
 			counts: &counts, root: o.dir, mode: mode, elapsed: elapsed, status: rc,
 		})
 	}
@@ -458,7 +468,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 // travels on a channel: there is no scratch directory, no per-record result
 // file and no event log, because workers here share an address space. The shell
 // implementation needed thirteen temporary files to carry exactly this.
-func runWorkers(ctx context.Context, files []File, o *options, disp *Display) <-chan Verdict {
+func runWorkers(ctx context.Context, files []File, o *options, disp *Display, gate *pauseGate) <-chan Verdict {
 	out := make(chan Verdict, o.jobs*4)
 	type job struct {
 		idx int
@@ -479,12 +489,15 @@ func runWorkers(ctx context.Context, files []File, o *options, disp *Display) <-
 					return
 				default:
 				}
+				if err := gate.wait(ctx); err != nil {
+					return
+				}
 				var prog progressFn
 				if disp != nil {
 					disp.Begin(worker, j.f.Path, j.f.Size)
 					prog = func(n int64) { disp.Progress(worker, n) }
 				}
-				v := checkFile(ctx, j.f, opts, buf, prog)
+				v := checkFile(ctx, j.f, opts, buf, prog, gate)
 				v.Index = j.idx
 				if disp != nil {
 					disp.Finish(worker, v)

@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-func fakeReview(n int) *review {
+// fakeResults builds a Display already in its results state, which is what the
+// post-run view renders from now that the live view and the results view share
+// one frame.
+func fakeResults(n int) *Display {
 	fs := make([]Failure, 0, n)
 	for i := 0; i < n; i++ {
 		switch i % 3 {
@@ -29,17 +32,27 @@ func fakeReview(n int) *review {
 			})
 		}
 	}
-	return &review{
-		failures: fs, c: newColors(false), out: os.Stdout, root: "/Volumes/Media",
-		res: results{
-			counts:  &Counters{Scanned: 500, OK: 500 - n, Failures: fs},
-			root:    "/Volumes/Media",
-			mode:    "Verify only",
-			elapsed: 62,
-			status:  1,
-		},
-		sc: NewScreen(os.Stdout, 30, 100), cache: map[int]forensics{},
+	// Rendered, never painted: the renderer points at the null device so a
+	// test that only inspects the frame does not scribble on the test output.
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		panic(err)
 	}
+	d := NewDisplay(NewRenderer(devnull), newColors(false), 4, 500, 0,
+		"/Volumes/Media", "Verify only", true)
+	d.ShowResults(results{
+		counts: &Counters{
+			Scanned: 500, OK: 500 - n, Failures: fs,
+			Mismatch: countOutcome(fs, OutcomeMismatch),
+			IOErr:    countOutcome(fs, OutcomeIOError),
+			Missing:  countOutcome(fs, OutcomeMissing),
+		},
+		root:    "/Volumes/Media",
+		mode:    "Verify only",
+		elapsed: 62,
+		status:  1,
+	})
+	return d
 }
 
 // TestReviewGeometry is the same property the dashboard has to hold: every row
@@ -50,10 +63,9 @@ func TestReviewGeometry(t *testing.T) {
 		{30, 100}, {24, 80}, {50, 200}, {14, 60}, {10, 40}, {9, 100}, {40, 41},
 	} {
 		for _, n := range []int{1, 5, 200} {
-			r := fakeReview(n)
-			r.sc = NewScreen(os.Stdout, size.rows, size.cols)
-			r.sel = n - 1
-			frame := r.render()
+			d := fakeResults(n)
+			d.SelectLast()
+			frame := d.renderDashboard(size.rows, size.cols)
 			if len(frame) > size.rows {
 				t.Errorf("%dx%d n=%d: %d rows, screen has %d",
 					size.rows, size.cols, n, len(frame), size.rows)
@@ -71,10 +83,11 @@ func TestReviewGeometry(t *testing.T) {
 // TestReviewKeepsSelectionVisible: with more problems than rows, the selected
 // row has to stay on screen or the keys move something the reader cannot see.
 func TestReviewKeepsSelectionVisible(t *testing.T) {
-	r := fakeReview(200)
+	d := fakeResults(200)
 	for _, sel := range []int{0, 1, 50, 150, 199} {
-		r.sel = sel
-		frame := r.render()
+		d.SelectFirst()
+		d.Move(sel)
+		frame := d.renderDashboard(30, 100)
 		found := false
 		for _, row := range frame {
 			if strings.Contains(row, "▸") {
@@ -170,11 +183,26 @@ func TestDecodeKey(t *testing.T) {
 		{[]byte("g"), keyHome},
 		{[]byte("G"), keyEnd},
 		{[]byte("q"), keyQuit},
-		{[]byte("\x1b"), keyQuit},
+		{[]byte("p"), keyPause},
+		{[]byte(" "), keyBand},
+		{[]byte("\t"), keyWide},
+		// A bare ESC is not quit. It is the first byte of every arrow key, and
+		// a short read would otherwise end the session on an arrow press.
+		{[]byte("\x1b"), keyNone},
 		{[]byte("z"), keyNone},
 	} {
 		if got := decodeKey(tc.in); got != tc.want {
 			t.Errorf("decodeKey(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
+}
+
+func countOutcome(fs []Failure, o Outcome) int {
+	n := 0
+	for _, f := range fs {
+		if f.Outcome == o {
+			n++
+		}
+	}
+	return n
 }

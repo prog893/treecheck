@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -155,20 +154,6 @@ func assess(f Failure, fo forensics) []string {
 	return nil
 }
 
-// review is the post-run browser. It owns the terminal for as long as it runs
-// and restores it on every exit path.
-type review struct {
-	failures []Failure
-	sel      int
-	scroll   int
-	sc       *Screen
-	c        *colors
-	out      *os.File
-	root     string
-	res      results
-	cache    map[int]forensics
-}
-
 // results is everything the view needs to describe a finished run.
 type results struct {
 	counts  *Counters
@@ -178,29 +163,41 @@ type results struct {
 	status  int
 }
 
-// runReview shows the finished run and waits. Passing an existing screen keeps
-// the alternate buffer the live view was already using, so the transition from
-// scanning to results does not flash the primary screen in between; passing nil
-// opens and closes one.
-func runReview(out *os.File, c *colors, sc *Screen, res results) {
-	restore, ok := rawMode(out)
+// runResults keeps the live view on screen and turns it into the results view,
+// then waits. The frame does not change shape: the same panes carry problems
+// and evidence instead of workers and a stream, so nothing the reader was
+// looking at moves at the moment they have something to act on.
+func runResults(d *Display, res results) {
+	// Wrapped, not "defer d.Screen().Leave()": the receiver of a deferred
+	// method call is evaluated when the defer is registered, which is before
+	// ShowResults has created the screen. That captured nil every time.
+	defer func() { d.Screen().Leave() }()
+	d.ShowResults(res)
+	readKeys(d)
+}
+
+// runReviewStandalone shows the same results view for a run that printed its
+// verdicts to stdout, where no live view was ever on screen.
+func runReviewStandalone(out *os.File, c *colors, jobs int, res results) {
+	rows, cols := terminalSize(out)
+	d := NewDisplay(NewRenderer(out), c, jobs, res.counts.Scanned, 0,
+		res.root, res.mode, true)
+	d.screen = NewScreen(out, rows, cols)
+	d.screen.Enter()
+	defer d.screen.Leave()
+	d.ShowResults(res)
+	readKeys(d)
+}
+
+// readKeys owns the terminal for the results view and returns when asked to
+// quit. A blocking read is right here: nothing else is happening, so there is
+// no reason to wake up and redraw a screen that cannot have changed.
+func readKeys(d *Display) {
+	restore, ok := rawMode(d.r.out)
 	if !ok {
 		return
 	}
 	defer restore()
-
-	rows, cols := terminalSize(out)
-	owned := sc == nil
-	if owned {
-		sc = NewScreen(out, rows, cols)
-	}
-	r := &review{
-		failures: res.counts.Failures, c: c, out: out, root: res.root,
-		res: res, sc: sc, cache: map[int]forensics{},
-	}
-	sc.Enter()
-	defer sc.Leave()
-	sc.Resize(terminalSize(out))
 
 	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
 	if err != nil {
@@ -208,12 +205,9 @@ func runReview(out *os.File, c *colors, sc *Screen, res results) {
 	}
 	defer tty.Close()
 
-	r.draw()
-	buf := make([]byte, 8)
 	fd := int(tty.Fd())
+	buf := make([]byte, 8)
 	for {
-		// syscall.Read for the same reason the key watcher uses it: a
-		// zero-byte read is a timeout, and os.File.Read reports it as EOF.
 		n, err := syscall.Read(fd, buf)
 		if err == syscall.EINTR {
 			continue
@@ -222,24 +216,25 @@ func runReview(out *os.File, c *colors, sc *Screen, res results) {
 			return
 		}
 		switch decodeKey(buf[:n]) {
-		case keyUp:
-			r.move(-1)
-		case keyDown:
-			r.move(1)
-		case keyPageUp:
-			r.move(-10)
-		case keyPageDown:
-			r.move(10)
-		case keyHome:
-			r.sel = 0
-		case keyEnd:
-			r.sel = len(r.failures) - 1
 		case keyQuit:
 			return
+		case keyUp:
+			d.Move(-1)
+		case keyDown:
+			d.Move(1)
+		case keyPageUp:
+			d.Move(-10)
+		case keyPageDown:
+			d.Move(10)
+		case keyHome:
+			d.SelectFirst()
+		case keyEnd:
+			d.SelectLast()
+		case keyBand:
+			d.ToggleExpanded()
+		case keyWide:
+			d.ToggleWide()
 		}
-		rows, cols := terminalSize(out)
-		r.sc.Resize(rows, cols)
-		r.draw()
 	}
 }
 
@@ -254,10 +249,16 @@ const (
 	keyHome
 	keyEnd
 	keyQuit
+	keyPause
+	keyBand
+	keyWide
 )
 
 // decodeKey handles the arrow keys, which arrive as escape sequences rather
 // than single bytes, alongside the vi-style and plain letters.
+//
+// A bare ESC is deliberately not quit: it is the first byte of every arrow
+// key, and a short read would otherwise end the session on an arrow press.
 func decodeKey(b []byte) key {
 	if len(b) >= 3 && b[0] == 0x1b && b[1] == '[' {
 		switch b[2] {
@@ -286,251 +287,15 @@ func decodeKey(b []byte) key {
 			return keyHome
 		case 'G':
 			return keyEnd
-		case 'q', 'Q', 0x1b, 3, 4:
+		case 'p', 'P':
+			return keyPause
+		case ' ':
+			return keyBand
+		case '\t':
+			return keyWide
+		case 'q', 'Q', 3, 4:
 			return keyQuit
 		}
 	}
 	return keyNone
-}
-
-func (r *review) move(n int) {
-	r.sel += n
-	if r.sel < 0 {
-		r.sel = 0
-	}
-	if r.sel >= len(r.failures) {
-		r.sel = len(r.failures) - 1
-	}
-}
-
-func (r *review) forensicsFor(i int) forensics {
-	if f, ok := r.cache[i]; ok {
-		return f
-	}
-	f := gather(r.failures[i])
-	r.cache[i] = f
-	return f
-}
-
-func (r *review) draw() { r.sc.Draw(r.render()) }
-
-func (r *review) render() []string {
-	rows, cols := r.sc.rows, r.sc.cols
-	if cols < 40 || rows < 10 {
-		return []string{truncVisible(fmt.Sprintf(" %d problems; terminal too small to review",
-			len(r.failures)), cols)}
-	}
-	cols = uiWidth(cols)
-	if len(r.failures) == 0 {
-		return r.renderClean(rows, cols)
-	}
-
-	var mism, ioerr, missing int
-	for _, f := range r.failures {
-		switch f.Outcome {
-		case OutcomeMismatch:
-			mism++
-		case OutcomeIOError:
-			ioerr++
-		case OutcomeMissing:
-			missing++
-		}
-	}
-
-	listH := (rows - 4) / 2
-	if listH < 3 {
-		listH = 3
-	}
-	if listH > 12 {
-		listH = 12
-	}
-	// Keep the selection on screen.
-	if r.sel < r.scroll {
-		r.scroll = r.sel
-	}
-	if r.sel >= r.scroll+listH {
-		r.scroll = r.sel - listH + 1
-	}
-
-	out := make([]string, 0, rows)
-	title := fmt.Sprintf("problems · %d mismatched · %d io · %d no usable sidecar",
-		mism, ioerr, missing)
-	out = append(out, hrule(bTL, bTR, cols, title, nil))
-
-	for i := 0; i < listH; i++ {
-		idx := r.scroll + i
-		if idx >= len(r.failures) {
-			out = append(out, boxRow(cols, ""))
-			continue
-		}
-		f := r.failures[idx]
-		marker := "  "
-		if idx == r.sel {
-			marker = r.c.cyan("▸ ")
-		}
-		tok := padRight(f.Token, verdictWidth)
-		switch f.Outcome {
-		case OutcomeMismatch:
-			tok = r.c.red(tok)
-		case OutcomeIOError:
-			tok = r.c.yellow(tok)
-		}
-		rel := f.Path
-		if p, err := filepath.Rel(r.root, f.Path); err == nil && !strings.HasPrefix(p, "..") {
-			rel = p
-		}
-		line := fmt.Sprintf("%s%s %s", marker, tok, displayPath(rel))
-		if idx == r.sel {
-			line = padVisible(truncVisible(line, cols-2), cols-2)
-		}
-		out = append(out, boxRow(cols, line))
-	}
-
-	out = append(out, hrule(bLT, bRT, cols, "detail", nil))
-	// Four rows follow the detail pane: its closing rule, the summary row, the
-	// key hints and the bottom border.
-	for _, l := range r.detailLines(cols-2, rows-len(out)-4) {
-		out = append(out, boxRow(cols, l))
-	}
-	out = append(out, hrule(bLT, bRT, cols, "", nil))
-	out = append(out, boxRow(cols, r.summaryLine(cols-2)))
-	out = append(out, boxRow(cols, r.c.dim(fmt.Sprintf(
-		" %d/%d   [↑↓ jk] move  [g G] first last  [q] quit",
-		r.sel+1, len(r.failures)))))
-	out = append(out, hrule(bBL, bBR, cols, "", nil))
-	return out
-}
-
-// summaryLine is the whole run in one row. In full-screen mode nothing is
-// written to stdout, so this view is the only place the counters appear and it
-// has to carry them rather than assume they scrolled past earlier.
-func (r *review) summaryLine(w int) string {
-	n := r.res.counts
-	left := fmt.Sprintf(" %d scanned · %s verified", n.Scanned, r.c.green(itoa(n.OK)))
-	if n.Created > 0 {
-		left += fmt.Sprintf(" · %d created", n.Created)
-	}
-	if n.Unverified > 0 {
-		left += fmt.Sprintf(" · %d not verified", n.Unverified)
-	}
-	if n.Unreached > 0 {
-		left += fmt.Sprintf(" · %s", r.c.yellow(itoa(n.Unreached)+" not reached"))
-	}
-	right := fmtDur(r.res.elapsed) + " · " + r.statusWord()
-	if pad := w - visibleLen(left) - visibleLen(right) - 1; pad > 0 {
-		return left + strings.Repeat(" ", pad) + right + " "
-	}
-	return truncVisible(left, w)
-}
-
-func (r *review) statusWord() string {
-	switch r.res.status {
-	case 0:
-		return r.c.green("clean")
-	case 2:
-		return r.c.yellow("no usable sidecar")
-	case 130:
-		return r.c.yellow("interrupted")
-	default:
-		return r.c.red("failed")
-	}
-}
-
-func (r *review) detailLines(w, h int) []string {
-	f := r.failures[r.sel]
-	fo := r.forensicsFor(r.sel)
-	var out []string
-	add := func(format string, args ...any) {
-		out = append(out, truncVisible(" "+fmt.Sprintf(format, args...), w))
-	}
-
-	add("%s", r.c.cyan(displayPath(f.Path)))
-	out = append(out, "")
-
-	if fo.fileOK {
-		add("file      %s   mode %v   %s",
-			exactBytes(fo.fileSize), fo.fileMode.Perm(), fo.fileMod.Format(time.RFC3339))
-	} else {
-		add("file      %s", r.c.yellow("not present"))
-	}
-	if fo.sideOK {
-		add("sidecar   %s   %s", exactBytes(fo.sideSize), fo.sideMod.Format(time.RFC3339))
-	} else {
-		add("sidecar   %s", r.c.yellow("not present"))
-	}
-	if f.Recorded != "" {
-		out = append(out, "")
-		add("recorded  %s", f.Recorded)
-		add("computed  %s", r.c.red(f.Computed))
-	}
-	if len(fo.assessment) > 0 {
-		out = append(out, "")
-		for i, a := range fo.assessment {
-			if i == 0 {
-				add("%s", r.c.yellow(a))
-			} else {
-				add("%s", a)
-			}
-		}
-	}
-	for len(out) < h {
-		out = append(out, "")
-	}
-	if len(out) > h {
-		out = out[:h]
-	}
-	return out
-}
-
-// renderClean is what --review shows when there is nothing wrong. A run that
-// came back clean is a result, and being asked to press a key to dismiss it is
-// the point of having asked for the screen.
-func (r *review) renderClean(rows, cols int) []string {
-	n := r.res.counts
-	title := "nothing wrong"
-	headline := "every file matched its sidecar"
-	switch r.res.status {
-	case 130:
-		title, headline = "interrupted", "the counters below cover only the files reached"
-	case 2:
-		title, headline = "no usable sidecar", "nothing is corrupt, but some files have no sidecar yet"
-	}
-	out := []string{hrule(bTL, bTR, cols, title, nil)}
-	out = append(out, boxRow(cols, ""))
-	if r.res.status == 0 {
-		headline = r.c.green(headline)
-	} else {
-		headline = r.c.yellow(headline)
-	}
-	out = append(out, boxRow(cols, "  "+headline))
-	out = append(out, boxRow(cols, ""))
-	out = append(out, boxRow(cols, "  "+r.c.dim(displayPath(r.res.root)+" · "+r.res.mode)))
-	out = append(out, boxRow(cols, ""))
-	pair := func(label, value string) string {
-		gap := cols - 6 - len(label) - len(value)
-		if gap < 1 {
-			gap = 1
-		}
-		return "  " + label + strings.Repeat(" ", gap) + value
-	}
-	out = append(out, boxRow(cols, pair("scanned", itoa(n.Scanned))))
-	out = append(out, boxRow(cols, pair("verified", itoa(n.OK))))
-	if n.Created > 0 {
-		out = append(out, boxRow(cols, pair("created", itoa(n.Created))))
-	}
-	if n.Unverified > 0 {
-		out = append(out, boxRow(cols, pair("not verified", itoa(n.Unverified))))
-	}
-	if n.Missing > 0 {
-		out = append(out, boxRow(cols, pair("no usable sidecar", itoa(n.Missing))))
-	}
-	if n.Unreached > 0 {
-		out = append(out, boxRow(cols, pair("not reached", itoa(n.Unreached))))
-	}
-	out = append(out, boxRow(cols, pair("elapsed", fmtDur(r.res.elapsed))))
-	out = append(out, boxRow(cols, ""))
-	out = append(out, hrule(bLT, bRT, cols, "", nil))
-	out = append(out, boxRow(cols, r.c.dim("  [q] quit")))
-	out = append(out, hrule(bBL, bBR, cols, "", nil))
-	return out
 }
