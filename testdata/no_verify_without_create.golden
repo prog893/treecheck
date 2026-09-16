@@ -1,0 +1,4 @@
+exit: 0
+--- stdout ---
+Nothing to do: verify mode with skip-verify flag
+--- stderr ---

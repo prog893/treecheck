@@ -1,0 +1,31 @@
+exit: 0
+--- stdout ---
+Mode: Create only | Dir: ROOT | Depth: unlimited
+Workers: 4 (parallel hashing)
+
+Hashing with 4 parallel workers...
+skipped  ROOT/bad.bin
+         sidecar already exists, not verified
+created  ROOT/emptysc.bin
+         not read back
+skipped  ROOT/good.bin
+         sidecar already exists, not verified
+missing  ROOT/junksc.bin
+         sidecar does not hold a SHA-256 digest
+skipped  ROOT/noperm.bin
+         sidecar already exists, not verified
+created  ROOT/nosidecar.bin
+         not read back
+skipped  ROOT/sub/nested.bin
+         sidecar already exists, not verified
+
+Scanned:         7 files
+Verified:        0
+Created:         2
+Not verified:    6
+Mismatched:      0
+Missing/empty:   1
+I/O errors:      0
+Elapsed:         X
+✓ Completed successfully
+--- stderr ---

@@ -1,0 +1,4 @@
+exit: 0
+--- stdout ---
+treecheck 2.0.0
+--- stderr ---

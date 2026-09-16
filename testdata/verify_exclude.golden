@@ -1,0 +1,29 @@
+exit: 1
+--- stdout ---
+Mode: Verify only | Dir: ROOT | Depth: unlimited
+Excluding: sub
+Workers: 4 (parallel hashing)
+
+Hashing with 4 parallel workers...
+MISMATCH ROOT/bad.bin
+         recorded f41f3fa625ff120ddca7ef456bf66371ecea23c129f4e4c32367101edb516cf8
+         now      bf573149b23303cac63c2a359b53760d919770c5d070047e76de42e2184f1046
+missing  ROOT/emptysc.bin
+         sidecar is empty
+ok       ROOT/good.bin
+missing  ROOT/junksc.bin
+         sidecar does not hold a SHA-256 digest
+io-error ROOT/noperm.bin
+         file could not be read
+missing  ROOT/nosidecar.bin
+
+Scanned:         6 files
+Verified:        1
+Mismatched:      1   <- corrupt
+  ROOT/bad.bin
+Missing/empty:   3
+I/O errors:      1
+  ROOT/noperm.bin
+Elapsed:         X
+--- stderr ---
+ERROR: Completed with errors
