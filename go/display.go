@@ -78,6 +78,8 @@ type Display struct {
 	res       results
 	sel       int
 	forensics map[int]forensics
+	// final is the last live reading, taken when the scan ended.
+	final *statsSnapshot
 
 	// Descriptive fields for the dashboard header, fixed for the run.
 	root string
@@ -118,6 +120,18 @@ type statsSnapshot struct {
 }
 
 func (d *Display) snapshot() statsSnapshot {
+	// Frozen once the run is over. Every reading here is derived from the wall
+	// clock, so recomputing them on a repaint made elapsed climb and
+	// throughput fall while the reader did nothing but scroll: a finished run
+	// appeared to keep getting slower.
+	if d.done.Load() {
+		d.mu.Lock()
+		final := d.final
+		d.mu.Unlock()
+		if final != nil {
+			return *final
+		}
+	}
 	var st statsSnapshot
 	st.doneFiles = d.doneFiles.Load()
 	st.doneBytes = d.doneBytes.Load()
@@ -434,9 +448,13 @@ func (d *Display) ToggleExpanded() {
 
 // ShowResults moves the view into its results state without changing its shape.
 func (d *Display) ShowResults(res results) {
+	// Taken before the done flag is set, so it is a live reading rather than
+	// the frozen one it is about to become.
+	final := d.snapshot()
 	d.mu.Lock()
 	d.res = res
 	d.sel = 0
+	d.final = &final
 	d.mu.Unlock()
 	d.done.Store(true)
 	d.repaint()
@@ -515,7 +533,7 @@ func bar(frac float64, width int) string {
 // the eye cannot associate them across that gap. Capping the frame instead
 // leaves a band of dead terminal down one side, which is worse.
 const (
-	maxBarWidth   = 48
+	maxBarWidth   = 24
 	maxStatsWidth = 38
 	maxPathWidth  = 72
 )
@@ -661,19 +679,19 @@ const (
 // arithmetic a summary exists to save, and wanting everything that went wrong
 // without caring how it went wrong is the common case on a large volume.
 var statFilters = []struct {
-	label  string
-	indent bool
+	label string
+	depth int
 	// match reports whether an outcome belongs to this category. Nil means
 	// everything, which is not the same as a predicate that always returns
 	// true: it also means "apply no filter at all".
 	match func(Outcome) bool
 }{
-	{label: "everything"},
-	{label: "verified", match: func(o Outcome) bool { return o == OutcomeOK }},
-	{label: "problems", match: isProblem},
-	{label: "mismatched", indent: true, match: func(o Outcome) bool { return o == OutcomeMismatch }},
-	{label: "missing", indent: true, match: func(o Outcome) bool { return o == OutcomeMissing }},
-	{label: "io errors", indent: true, match: func(o Outcome) bool { return o == OutcomeIOError }},
+	{label: "everything", depth: 0},
+	{label: "verified", depth: 1, match: func(o Outcome) bool { return o == OutcomeOK }},
+	{label: "problems", depth: 1, match: isProblem},
+	{label: "mismatched", depth: 2, match: func(o Outcome) bool { return o == OutcomeMismatch }},
+	{label: "missing", depth: 2, match: func(o Outcome) bool { return o == OutcomeMissing }},
+	{label: "io errors", depth: 2, match: func(o Outcome) bool { return o == OutcomeIOError }},
 }
 
 // isProblem is every outcome that means something needs attention. Unverified

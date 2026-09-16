@@ -93,9 +93,10 @@ func TestDashboardDegradesRatherThanOverflows(t *testing.T) {
 	d := fakeDisplay(8)
 	hasBand := func(frame []string) bool {
 		for _, r := range frame {
-			// The band is identified by its own rule, not by the word
-			// appearing anywhere: the title line reads "N workers" too.
-			if strings.HasPrefix(r, bLT) && strings.Contains(r, " workers ") {
+			// The band is identified by its own pane title, not by the word
+			// appearing anywhere: the stream pane's title reads "N workers"
+			// too, and both rules now start the same way.
+			if strings.HasPrefix(r, bTL) && strings.Contains(r, bH+" workers "+bH) {
 				return true
 			}
 		}
@@ -115,35 +116,60 @@ func TestDashboardDegradesRatherThanOverflows(t *testing.T) {
 	}
 }
 
-// TestDashboardBordersAlign: the vertical rules have to sit in the same column
-// on every row of a band, or the panes visibly shear.
-func TestDashboardBordersAlign(t *testing.T) {
+// TestPanesDoNotShareBorders is the property that makes focus legible. A
+// shared border segment belongs to two panes at once, so highlighting it to
+// show focus says "one of these two", which is not what focus means. Where the
+// stream pane ends and the counters pane begins there must be two adjacent
+// verticals, one owned by each, and the boundary must sit in the same column
+// on every row of the band.
+func TestPanesDoNotShareBorders(t *testing.T) {
 	d := fakeDisplay(6)
 	frame := d.renderDashboard(30, 100)
-	var split = -1
+
+	seam := -1
 	for _, row := range frame {
 		r := []rune(row)
-		if len(r) == 0 || r[0] != []rune(bV)[0] {
-			continue
-		}
-		// Count only rows that carry an interior divider.
-		var mid []int
-		for i := 1; i < len(r)-1; i++ {
-			if string(r[i]) == bV {
-				mid = append(mid, i)
+		var verticals []int
+		for i, ch := range r {
+			if string(ch) == bV {
+				verticals = append(verticals, i)
 			}
 		}
-		if len(mid) != 1 {
-			continue
+		if len(verticals) != 4 {
+			continue // not a two-pane row
 		}
-		if split == -1 {
-			split = mid[0]
-		} else if mid[0] != split {
-			t.Fatalf("divider moved from column %d to %d:\n%s", split, mid[0], row)
+		// Middle two are the facing borders, and they must be adjacent.
+		if verticals[2] != verticals[1]+1 {
+			t.Fatalf("panes share a divider at %d/%d:\n%s",
+				verticals[1], verticals[2], row)
+		}
+		if seam == -1 {
+			seam = verticals[1]
+		} else if verticals[1] != seam {
+			t.Fatalf("pane boundary moved from %d to %d:\n%s", seam, verticals[1], row)
 		}
 	}
-	if split == -1 {
-		t.Fatal("no split rows found; the two-pane band did not render")
+	if seam == -1 {
+		t.Fatal("no two-pane rows found; the layout did not render")
+	}
+}
+
+// TestFinishedStatsAreFrozen: every reading in the pane is derived from the
+// wall clock, so recomputing them on a repaint made elapsed climb and
+// throughput fall while the reader did nothing but scroll a finished run.
+func TestFinishedStatsAreFrozen(t *testing.T) {
+	d := fakeDisplay(4)
+	d.ShowResults(results{counts: &Counters{Scanned: 10, OK: 10}, status: 0})
+	first := d.snapshot()
+	time.Sleep(1100 * time.Millisecond)
+	second := d.snapshot()
+	if first.elapsed != second.elapsed {
+		t.Errorf("elapsed moved after the run finished: %d then %d",
+			first.elapsed, second.elapsed)
+	}
+	if first.rate != second.rate || first.average != second.average {
+		t.Errorf("throughput moved after the run finished: %d/%d then %d/%d",
+			first.rate, first.average, second.rate, second.average)
 	}
 }
 

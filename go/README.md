@@ -108,7 +108,7 @@ Three marks, one role each, so a reader never has to work out which is which:
 
 | mark | means |
 |---|---|
-| highlighted border segment | this pane has the keys |
+| highlighted pane outline | this pane has the keys |
 | `▸` in the row gutter | this row is where the keys are pointing |
 | gutter space beside it | reserved for selection, once there is something to select |
 
@@ -123,11 +123,11 @@ is asked at:
 
 ```
    everything              48
-   verified                43
-   problems                 5
-     mismatched             2
-     missing                2
-     io errors              1
+     verified              43
+     problems               5
+       mismatched           2
+       missing              2
+       io errors            1
 ```
 
 Wanting everything that went wrong without caring how is the common case on a
@@ -153,6 +153,13 @@ counters are a narrow column of right-aligned numbers; the stream holds long
 variable-width text. Swapping them would put the ragged content against the
 right edge, where it is hardest to scan, and move the numbers away from the
 column the eye already expects them in.
+
+Panes do not share borders. A shared segment belongs to two panes at once, so
+highlighting it to show focus says "one of these two", which is not what focus
+means. Each pane owning its outline costs one row and two columns and makes the
+highlight unambiguous. The terminal window is the outer frame; adding another
+one inside it would cost two more rows and two more columns to say what the
+window already says.
 
 The frame fills the terminal. What is capped is the elements inside it: a
 300-column terminal is not a reason to draw a 100-cell progress bar or to push

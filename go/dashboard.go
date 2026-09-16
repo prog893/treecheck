@@ -96,335 +96,116 @@ func splitRowFocus(cols, split int, left, right string, c *colors, leftFocus, ri
 	return lb + l + mid + r + rb
 }
 
-// renderDashboard composes the whole screen. It degrades by dropping panes
-// rather than by overflowing: a terminal too short for the worker band loses
-// the worker band, and one too short for both bands still shows the headline
-// and the statistics, which is the part you cannot reconstruct by looking
-// elsewhere.
+// pane draws one bounded box, borders included, exactly w cells wide and h+2
+// rows tall.
+//
+// Panes do not share borders. A shared segment belongs to two panes at once,
+// so highlighting it to show focus says "one of these two", which is not what
+// focus means: the divider between the stream and the counters lit up for
+// either, and the rule above the worker band lit up for a pane that was not
+// the worker band. Every pane owning its own outline costs one row and two
+// columns, and makes the highlight unambiguous.
+func pane(c *colors, title string, w, h int, content []string, focused bool) []string {
+	top := hrule(bTL, bTR, w, title, nil)
+	bot := hrule(bBL, bBR, w, "", nil)
+	if focused {
+		top, bot = c.cyan(top), c.cyan(bot)
+	}
+	out := make([]string, 0, h+2)
+	out = append(out, top)
+	for i := 0; i < h; i++ {
+		out = append(out, boxRowFocus(w, rowAt(content, i), c, focused))
+	}
+	return append(out, bot)
+}
+
+// joinH places two blocks of rows side by side.
+func joinH(a, b []string) []string {
+	n := len(a)
+	if len(b) > n {
+		n = len(b)
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = rowAt(a, i) + rowAt(b, i)
+	}
+	return out
+}
+
 // renderDashboard composes the whole screen, before and after the scan ends.
 //
-// The frame is deliberately identical in both states: same border, same panes,
-// same places. Only what the panes hold changes, workers becoming problems and
-// the progress bar becoming the summary. A results screen with a different
-// shape makes the reader re-find everything they were already looking at, at
-// exactly the moment they have something to act on.
+// The layout is deliberately identical in both states: same panes in the same
+// places, carrying problems and evidence instead of workers and a stream once
+// there is nothing left to run. A results screen with a different shape makes
+// the reader re-find everything they were already looking at, at exactly the
+// moment they have something to act on.
 //
 // It degrades by dropping panes rather than by overflowing: a terminal too
-// short for the band loses the band, and one too short for both loses the
-// stream, because the statistics are the part that cannot be reconstructed by
-// looking elsewhere.
+// short for the band loses the band, because a list of workers is worth less
+// than knowing what the run found.
 func (d *Display) renderDashboard(rows, cols int) []string {
-	if cols < 40 || rows < 8 {
+	if cols < 40 || rows < 10 {
 		return d.renderTooSmall(rows, cols)
 	}
 	cols = uiWidth(cols)
 	st := d.snapshot()
 	done := d.done.Load()
+	focus := d.focus.Load()
 
-	band := d.bandRows(cols)
+	band := d.bandRows(cols - 2)
 	showBand := d.showBand.Load() && len(band) > 0
-	bandH := 0
+	bandBox := 0
 	if showBand {
-		bandH = len(band) + 1 // rows plus its rule
+		bandBox = len(band) + 2
 	}
 
-	bodyH := rows - (1 + 1 + bandH + 1 + 1)
-	// The band gives way well before it has to. Eight workers take nine rows,
-	// which on a short terminal leaves the body too thin to hold the counters,
-	// and a list of workers is worth less than knowing what the run found.
-	const minBody = 9
+	// Each box costs its two rules; the status row costs one.
+	bodyH := rows - bandBox - 2 - 1
+	const minBody = 7
 	if bodyH < minBody && showBand {
-		showBand, bandH = false, 0
-		bodyH = rows - (1 + 1 + 1 + 1)
+		showBand, bandBox = false, 0
+		bodyH = rows - 2 - 1
 	}
 	if bodyH < 1 {
 		bodyH = 1
 	}
-	// What the body height would be with the band showing, which is what the
-	// statistics pane is laid out against so it does not change when the band
-	// is toggled.
-	bodyWithBand := rows - (1 + 1 + len(band) + 1 + 1 + 1)
+	bodyWithBand := rows - (len(band) + 2) - 2 - 1
 	if bodyWithBand < 1 {
 		bodyWithBand = 1
 	}
 
 	statsW := capAt(cols*2/5, maxStatsWidth)
-	if statsW < 24 {
-		statsW = 24
+	if statsW < 26 {
+		statsW = 26
 	}
-	split := cols - statsW - 2
-	if split < 24 {
-		split = 24
-		statsW = cols - split - 2
+	streamW := cols - statsW
+	if streamW < 30 {
+		streamW = 30
+		statsW = cols - streamW
 	}
-
-	focus := d.focus.Load()
-	out := make([]string, 0, rows)
-	out = append(out, colorRuleHalves(
-		hrule(bTL, bTR, cols, d.title(done), map[int]string{split - 1: bTT}),
-		split-1, d.c, focus == focusStream, focus == focusStats))
 
 	// The statistics are laid out for the height they would have with the band
 	// showing, whichever way the band is actually set. Otherwise hiding the
-	// worker rows hands the pane more room and it grows a couple of counters
-	// back, so a key about workers silently changes which statistics exist.
-	// Only the stream takes the slack.
-	left := d.leftPane(bodyH, split-1, done)
-	right := d.statsLines(statsW, minInt(bodyH, bodyWithBand), st, done)
-	for i := 0; i < bodyH; i++ {
-		out = append(out, splitRowFocus(cols, split, rowAt(left, i), rowAt(right, i),
-			d.c, focus == focusStream, focus == focusStats))
-	}
+	// worker rows hands the pane more room and it grows a counter or two back,
+	// so a key about workers silently changes which statistics exist.
+	left := d.leftPane(bodyH, streamW-2, done)
+	right := d.statsLines(statsW-2, minInt(bodyH, bodyWithBand), st, done)
 
-	bandJoins := map[int]string{split - 1: bBT}
+	out := make([]string, 0, rows)
+	out = append(out, joinH(
+		pane(d.c, d.title(done), streamW, bodyH, left, focus == focusStream),
+		pane(d.c, "counters", statsW, bodyH, right, focus == focusStats))...)
 	if showBand {
-		// This rule separates the body from the band, so its halves belong to
-		// the panes above and its whole belongs to the band when the band has
-		// focus.
-		rule := hrule(bLT, bRT, cols, d.bandTitle(done), bandJoins)
-		if focus == focusBand {
-			rule = d.c.cyan(rule)
-		} else {
-			rule = colorRuleHalves(rule, split-1, d.c,
-				focus == focusStream, focus == focusStats)
-		}
-		out = append(out, rule)
-		for _, row := range band {
-			out = append(out, boxRowFocus(cols, row, d.c, focus == focusBand))
-		}
-		closing := hrule(bLT, bRT, cols, "", nil)
-		if focus == focusBand {
-			closing = d.c.cyan(closing)
-		}
-		out = append(out, closing)
-	} else {
-		out = append(out, colorRuleHalves(
-			hrule(bLT, bRT, cols, "", bandJoins), split-1, d.c,
-			focus == focusStream, focus == focusStats))
+		out = append(out, pane(d.c, d.bandTitle(done), cols, len(band), band,
+			focus == focusBand)...)
 	}
 
 	// Recorded for the page keys, which move by what is on screen.
 	d.paneH.Store(int32(bodyH))
 	d.bandH.Store(int32(len(band)))
 
-	out = append(out, boxRow(cols, d.bottomLine(cols-2, st, done)))
-	out = append(out, hrule(bBL, bBR, cols, "", nil))
+	out = append(out, d.bottomLine(cols, st, done))
 	return out
-}
-
-func rowAt(rows []string, i int) string {
-	if i < len(rows) {
-		return rows[i]
-	}
-	return ""
-}
-
-func (d *Display) title(done bool) string {
-	if !done {
-		workers := "workers"
-		if len(d.slots) == 1 {
-			workers = "worker"
-		}
-		return fmt.Sprintf("treecheck · %s · %s · %d %s",
-			truncRunes(displayPath(d.root), 40), d.mode, len(d.slots), workers)
-	}
-	d.mu.Lock()
-	res := d.res
-	d.mu.Unlock()
-	n := res.counts
-	if n == nil {
-		return "treecheck · finished"
-	}
-	if len(n.Failures) == 0 {
-		return fmt.Sprintf("treecheck · %s · %s",
-			truncRunes(displayPath(d.root), 40), statusPhrase(res.status))
-	}
-	return fmt.Sprintf("treecheck · %d mismatched · %d io · %d no usable sidecar",
-		n.Mismatch, n.IOErr, n.Missing)
-}
-
-func statusPhrase(status int) string {
-	switch status {
-	case 0:
-		return "nothing wrong"
-	case 2:
-		return "no usable sidecar"
-	case 130:
-		return "interrupted"
-	default:
-		return "failed"
-	}
-}
-
-func (d *Display) bandTitle(done bool) string {
-	if done {
-		return "problems"
-	}
-	return "workers"
-}
-
-// bandRows is the lower band: one row per worker while scanning, one row per
-// problem once finished.
-func (d *Display) bandRows(cols int) []string {
-	if !d.done.Load() {
-		rows := make([]string, 0, len(d.slots))
-		for i, s := range d.slots {
-			rows = append(rows, d.slotRow(i, s, cols-2))
-		}
-		return rows
-	}
-	d.mu.Lock()
-	res, sel := d.res, d.sel
-	d.mu.Unlock()
-	if res.counts == nil || len(res.counts.Failures) == 0 {
-		return nil
-	}
-	// Limited to the selected counter, so picking "mismatched" in the
-	// statistics pane narrows the list to the files that matter rather than
-	// only recolouring a number.
-	fs := res.counts.Failures
-	if match, filtered := d.filter(); filtered {
-		kept := make([]Failure, 0, len(fs))
-		for _, f := range fs {
-			if match(f.Outcome) {
-				kept = append(kept, f)
-			}
-		}
-		if len(kept) > 0 {
-			fs = kept
-			if sel >= len(fs) {
-				sel = len(fs) - 1
-			}
-		}
-	}
-
-	// A window that keeps the selection visible, so the keys move something
-	// the reader can see.
-	const maxRows = 10
-	h := len(fs)
-	if h > maxRows {
-		h = maxRows
-	}
-	start := sel - h/2
-	if start > len(fs)-h {
-		start = len(fs) - h
-	}
-	if start < 0 {
-		start = 0
-	}
-
-	rows := make([]string, 0, h)
-	for i := start; i < start+h; i++ {
-		f := fs[i]
-		marker := rowCursor(d.c, i == sel)
-		tok := padRight(f.Token, verdictWidth)
-		switch f.Outcome {
-		case OutcomeMismatch:
-			tok = d.c.red(tok)
-		case OutcomeIOError:
-			tok = d.c.yellow(tok)
-		}
-		rel := f.Path
-		if p, err := filepath.Rel(res.root, f.Path); err == nil && !strings.HasPrefix(p, "..") {
-			rel = p
-		}
-		rows = append(rows, marker+tok+" "+displayPath(rel))
-	}
-	return rows
-}
-
-// leftPane is the verdict stream while scanning, and the selected problem's
-// evidence once finished.
-func (d *Display) leftPane(h, w int, done bool) []string {
-	if !done {
-		return d.recentLines(h)
-	}
-	d.mu.Lock()
-	res, sel := d.res, d.sel
-	d.mu.Unlock()
-	if res.counts == nil || len(res.counts.Failures) == 0 {
-		return d.cleanPane(h, w, res)
-	}
-	return d.detailPane(h, w, res, sel)
-}
-
-func (d *Display) cleanPane(h, w int, res results) []string {
-	out := []string{""}
-	head := "every file matched its sidecar"
-	switch res.status {
-	case 130:
-		head = d.c.yellow("stopped early; only the files below were checked")
-	case 2:
-		head = d.c.yellow("nothing is corrupt, but some files have no sidecar yet")
-	default:
-		head = d.c.green(head)
-	}
-	out = append(out, " "+head, "")
-	for _, l := range d.recentLines(h - len(out)) {
-		out = append(out, l)
-	}
-	return out
-}
-
-func (d *Display) detailPane(h, w int, res results, sel int) []string {
-	fs := res.counts.Failures
-	if sel < 0 || sel >= len(fs) {
-		return nil
-	}
-	f := fs[sel]
-	fo := d.forensicsFor(sel, f)
-
-	var out []string
-	add := func(format string, args ...any) {
-		out = append(out, truncVisible(" "+fmt.Sprintf(format, args...), w))
-	}
-	add("%s", d.c.cyan(displayPath(f.Path)))
-	out = append(out, "")
-	if fo.fileOK {
-		add("file      %s   mode %v", exactBytes(fo.fileSize), fo.fileMode.Perm())
-		add("          %s", fo.fileMod.Format(time.RFC3339))
-	} else {
-		add("file      %s", d.c.yellow("not present"))
-	}
-	if fo.sideOK {
-		add("sidecar   %s   %s", exactBytes(fo.sideSize), fo.sideMod.Format(time.RFC3339))
-	} else {
-		add("sidecar   %s", d.c.yellow("not present"))
-	}
-	if f.Recorded != "" {
-		out = append(out, "")
-		add("recorded  %s", f.Recorded)
-		add("computed  %s", d.c.red(f.Computed))
-	}
-	if len(fo.assessment) > 0 {
-		out = append(out, "")
-		for i, a := range fo.assessment {
-			if i == 0 {
-				add("%s", d.c.yellow(a))
-			} else {
-				add("%s", a)
-			}
-		}
-	}
-	return out
-}
-
-func (d *Display) forensicsFor(i int, f Failure) forensics {
-	d.mu.Lock()
-	if d.forensics == nil {
-		d.forensics = map[int]forensics{}
-	}
-	if fo, ok := d.forensics[i]; ok {
-		d.mu.Unlock()
-		return fo
-	}
-	d.mu.Unlock()
-
-	fo := gather(f)
-	d.mu.Lock()
-	d.forensics[i] = fo
-	d.mu.Unlock()
-	return fo
 }
 
 func (d *Display) renderTooSmall(rows, cols int) []string {
@@ -527,12 +308,9 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 	}
 	rows := []row{{"", 2}}
 	for i, f := range statFilters {
-		label := f.label
-		if f.indent {
-			// Nested under "problems", so the grouping is visible rather than
-			// something to be inferred from the order.
-			label = "  " + label
-		}
+		// Indented by depth, so the grouping is visible rather than something
+		// to be inferred from the order.
+		label := strings.Repeat("  ", f.depth) + f.label
 		rows = append(rows, row{mark(i, pairIn(label, counts[i], w-4)), 0})
 	}
 	rows = append(rows, row{"", 2})
@@ -547,7 +325,7 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 		rows = append(rows,
 			row{pair("elapsed", fmtDur(st.elapsed)), 0},
 			row{"", 2},
-			row{pair("average", c.cyan(humanBytes(st.rate)+"/s")), 1},
+			row{pair("throughput", c.cyan(humanBytes(st.average)+"/s")), 1},
 		)
 	} else {
 		rows = append(rows,
@@ -581,8 +359,10 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 // bottomLine is the progress bar while scanning and the summary afterwards,
 // each with the keys that apply in that state.
 func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
-	// Half the row at most, so the bar and the summary keep somewhere to live.
-	hint := d.hintText(done, st.paused, w/2)
+	// The lead is sized first and the hints get what is left, rather than each
+	// taking half the row. Splitting it evenly meant a bar that never wants
+	// more than a couple of dozen cells reserved half a wide terminal, and the
+	// hints fell back to their short forms with room to spare.
 	var lead string
 	if done {
 		lead = d.summaryText()
@@ -591,14 +371,14 @@ func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
 		if st.paused {
 			pct = " " + d.c.yellow("PAUSED") + " "
 		}
-		barW := capAt(w-visibleLen(hint)-visibleLen(pct)-3, maxBarWidth)
-
-		if barW < 4 {
-			return truncVisible(" "+pct+hint, w)
+		if barW := capAt(w/3, maxBarWidth); barW >= 4 {
+			lead = " " + d.c.cyan(bar(st.frac, barW)) + pct
+		} else {
+			lead = pct
 		}
-		lead = " " + d.c.cyan(bar(st.frac, barW)) + pct
 	}
-	if pad := w - visibleLen(lead) - visibleLen(hint); pad > 0 {
+	hint := d.hintText(done, st.paused, w-visibleLen(lead)-2)
+	if pad := w - visibleLen(lead) - visibleLen(hint) - 1; pad > 0 {
 		return lead + strings.Repeat(" ", pad) + d.c.dim(hint)
 	}
 	return truncVisible(lead+" "+d.c.dim(hint), w)
@@ -736,4 +516,213 @@ func colorRuleHalves(rule string, at int, c *colors, leftFocused, rightFocused b
 		return c.cyan(left) + right
 	}
 	return left + c.cyan(right)
+}
+
+func rowAt(rows []string, i int) string {
+	if i < len(rows) {
+		return rows[i]
+	}
+	return ""
+}
+
+// title names the run while it is running and its outcome once it is not. It
+// lives in the stream pane's own border, since panes no longer share one.
+func (d *Display) title(done bool) string {
+	if !done {
+		workers := "workers"
+		if len(d.slots) == 1 {
+			workers = "worker"
+		}
+		return fmt.Sprintf("%s · %s · %d %s",
+			truncRunes(displayPath(d.root), 32), d.mode, len(d.slots), workers)
+	}
+	d.mu.Lock()
+	res := d.res
+	d.mu.Unlock()
+	if res.counts == nil {
+		return "finished"
+	}
+	if len(res.counts.Failures) == 0 {
+		return statusPhrase(res.status)
+	}
+	return "detail"
+}
+
+func statusPhrase(status int) string {
+	switch status {
+	case 0:
+		return "nothing wrong"
+	case 2:
+		return "no usable sidecar"
+	case 130:
+		return "interrupted"
+	default:
+		return "failed"
+	}
+}
+
+func (d *Display) bandTitle(done bool) string {
+	if done {
+		return "problems"
+	}
+	return "workers"
+}
+
+// bandRows is the lower band: one row per worker while scanning, one row per
+// problem once finished.
+func (d *Display) bandRows(w int) []string {
+	if !d.done.Load() {
+		rows := make([]string, 0, len(d.slots))
+		for i, s := range d.slots {
+			rows = append(rows, d.slotRow(i, s, w))
+		}
+		return rows
+	}
+	d.mu.Lock()
+	res, sel := d.res, d.sel
+	d.mu.Unlock()
+	if res.counts == nil || len(res.counts.Failures) == 0 {
+		return nil
+	}
+	// Limited to the selected counter, so picking "mismatched" narrows the
+	// list to the files that matter rather than only recolouring a number.
+	fs := res.counts.Failures
+	if match, filtered := d.filter(); filtered {
+		kept := make([]Failure, 0, len(fs))
+		for _, f := range fs {
+			if match(f.Outcome) {
+				kept = append(kept, f)
+			}
+		}
+		fs = kept
+		if sel >= len(fs) {
+			sel = len(fs) - 1
+		}
+	}
+	if len(fs) == 0 {
+		return []string{" " + d.c.dim("no files in this category")}
+	}
+
+	// A window that keeps the selection visible, so the keys move something
+	// the reader can see.
+	const maxRows = 10
+	h := len(fs)
+	if h > maxRows {
+		h = maxRows
+	}
+	start := sel - h/2
+	if start > len(fs)-h {
+		start = len(fs) - h
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	rows := make([]string, 0, h)
+	for i := start; i < start+h; i++ {
+		f := fs[i]
+		tok := padRight(f.Token, verdictWidth)
+		switch f.Outcome {
+		case OutcomeMismatch:
+			tok = d.c.red(tok)
+		case OutcomeIOError:
+			tok = d.c.yellow(tok)
+		}
+		rel := f.Path
+		if p, err := filepath.Rel(res.root, f.Path); err == nil && !strings.HasPrefix(p, "..") {
+			rel = p
+		}
+		rows = append(rows, rowCursor(d.c, i == sel)+tok+" "+displayPath(rel))
+	}
+	return rows
+}
+
+// leftPane is the verdict stream while scanning, and the selected problem's
+// evidence once finished.
+func (d *Display) leftPane(h, w int, done bool) []string {
+	if !done {
+		return d.recentLines(h)
+	}
+	d.mu.Lock()
+	res, sel := d.res, d.sel
+	d.mu.Unlock()
+	if res.counts == nil || len(res.counts.Failures) == 0 {
+		return d.cleanPane(h, w, res)
+	}
+	return d.detailPane(h, w, res, sel)
+}
+
+func (d *Display) cleanPane(h, w int, res results) []string {
+	head := "every file matched its sidecar"
+	switch res.status {
+	case 130:
+		head = d.c.yellow("stopped early; only the files below were checked")
+	case 2:
+		head = d.c.yellow("nothing is corrupt, but some files have no sidecar yet")
+	default:
+		head = d.c.green(head)
+	}
+	out := []string{"", " " + head, ""}
+	return append(out, d.recentLines(h-len(out))...)
+}
+
+func (d *Display) detailPane(h, w int, res results, sel int) []string {
+	fs := res.counts.Failures
+	if sel < 0 || sel >= len(fs) {
+		return nil
+	}
+	f := fs[sel]
+	fo := d.forensicsFor(sel, f)
+
+	var out []string
+	add := func(format string, args ...any) {
+		out = append(out, truncVisible(" "+fmt.Sprintf(format, args...), w))
+	}
+	add("%s", d.c.cyan(displayPath(f.Path)))
+	out = append(out, "")
+	if fo.fileOK {
+		add("file      %s   mode %v", exactBytes(fo.fileSize), fo.fileMode.Perm())
+		add("          %s", fo.fileMod.Format(time.RFC3339))
+	} else {
+		add("file      %s", d.c.yellow("not present"))
+	}
+	if fo.sideOK {
+		add("sidecar   %s   %s", exactBytes(fo.sideSize), fo.sideMod.Format(time.RFC3339))
+	} else {
+		add("sidecar   %s", d.c.yellow("not present"))
+	}
+	if f.Recorded != "" {
+		out = append(out, "")
+		add("recorded  %s", f.Recorded)
+		add("computed  %s", d.c.red(f.Computed))
+	}
+	if len(fo.assessment) > 0 {
+		out = append(out, "")
+		for i, a := range fo.assessment {
+			if i == 0 {
+				add("%s", d.c.yellow(a))
+			} else {
+				add("%s", a)
+			}
+		}
+	}
+	return out
+}
+
+func (d *Display) forensicsFor(i int, f Failure) forensics {
+	d.mu.Lock()
+	if d.forensics == nil {
+		d.forensics = map[int]forensics{}
+	}
+	if fo, ok := d.forensics[i]; ok {
+		d.mu.Unlock()
+		return fo
+	}
+	d.mu.Unlock()
+
+	fo := gather(f)
+	d.mu.Lock()
+	d.forensics[i] = fo
+	d.mu.Unlock()
+	return fo
 }
