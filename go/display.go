@@ -56,9 +56,16 @@ type Display struct {
 	// showBand toggles the lower band: worker rows while running, the problem
 	// list once finished.
 	showBand atomic.Bool
-	// wide hides the statistics pane so the verdict stream gets its width.
-	wide atomic.Bool
-	gate *pauseGate
+	// focus is which pane the arrow keys act on. One set of keys doing
+	// different things depending on where you are is how a two-pane view
+	// stays navigable without a key per pane.
+	focus atomic.Int32
+	// streamOff scrolls the verdict stream back from its newest line.
+	streamOff atomic.Int64
+	// statSel picks a counter in the statistics pane, which filters the
+	// stream and the problem list to that category.
+	statSel atomic.Int32
+	gate    *pauseGate
 
 	// Results, set once when the scan finishes. Guarded by mu. Forensics are
 	// gathered when a problem is first selected rather than during the run,
@@ -71,8 +78,10 @@ type Display struct {
 	root string
 	mode string
 
-	// Guarded by mu: the recent-verdict ring and the throughput history.
-	recent   []string
+	// Guarded by mu: the recent-verdict ring and the throughput history. The
+	// ring keeps each line's outcome so the stream can be filtered to one
+	// category without re-deriving it from the rendered text.
+	recent   []recentLine
 	rateHist []int64
 	lastB    int64
 	lastT    time.Time
@@ -95,7 +104,7 @@ type statsSnapshot struct {
 	doneFiles, doneBytes         int64
 	ok, mismatch, missing, ioerr int64
 	inflight                     int64
-	rate                         int64
+	rate, average                int64
 	elapsed, wall                int64
 	paused                       bool
 	frac                         float64
@@ -151,12 +160,34 @@ func (d *Display) snapshot() statsSnapshot {
 		st.frac = 0
 	}
 	if elapsed > 0 {
-		st.rate = int64(float64(seen) / elapsed.Seconds())
+		st.average = int64(float64(seen) / elapsed.Seconds())
+	}
+	// The displayed rate is the recent one, so it falls to zero when the work
+	// does. A run average cannot: it would still read 4GiB/s several minutes
+	// into a pause, which is the opposite of what the number is for. The
+	// estimate keeps using the average, because smoothing is what an estimate
+	// wants.
+	st.rate = st.average
+	d.mu.Lock()
+	if n := len(d.rateHist); n > 0 {
+		k := n
+		if k > 3 {
+			k = 3
+		}
+		var sum int64
+		for _, v := range d.rateHist[n-k:] {
+			sum += v
+		}
+		st.rate = sum / int64(k)
+	}
+	d.mu.Unlock()
+	if st.paused {
+		st.rate = 0
 	}
 	st.eta = "--"
-	if st.rate > 0 && d.totalBytes > 0 {
+	if st.average > 0 && d.totalBytes > 0 {
 		if remain := d.totalBytes - seen; remain > 0 {
-			st.eta = fmtDur(remain / st.rate)
+			st.eta = fmtDur(remain / st.average)
 		} else {
 			st.eta = "0s"
 		}
@@ -186,6 +217,10 @@ func (d *Display) sampleRate() {
 	if dt < 0.5 {
 		return
 	}
+	// Sampled whether or not the run is paused, so the recent rate decays to
+	// zero rather than freezing at whatever it was when the pause began.
+	// Sampled whether or not the run is paused, so the recent rate decays to
+	// zero instead of freezing at whatever it was when the pause began.
 	d.rateHist = append(d.rateHist, int64(float64(seen-d.lastB)/dt))
 	if len(d.rateHist) > 240 {
 		d.rateHist = d.rateHist[len(d.rateHist)-240:]
@@ -339,9 +374,17 @@ func (d *Display) Screen() *Screen {
 // stdout above the status block. In the full-screen view they feed the stream
 // pane and go nowhere else: that view owns the terminal and leaves it as it
 // found it, so writing to stdout would leave behind output nobody asked to keep.
-func (d *Display) Commit(lines []string) {
+func (d *Display) Commit(lines []string) { d.commit(OutcomeOK, lines) }
+
+// CommitVerdict records a verdict's lines along with the outcome they carry, so
+// the stream can be filtered later.
+func (d *Display) CommitVerdict(v Verdict, lines []string) { d.commit(v.Outcome, lines) }
+
+func (d *Display) commit(o Outcome, lines []string) {
 	d.mu.Lock()
-	d.recent = append(d.recent, lines...)
+	for _, l := range lines {
+		d.recent = append(d.recent, recentLine{outcome: o, text: l})
+	}
 	if len(d.recent) > recentCap {
 		d.recent = d.recent[len(d.recent)-recentCap:]
 	}
@@ -355,12 +398,6 @@ func (d *Display) Commit(lines []string) {
 func (d *Display) ToggleExpanded() {
 	d.expanded.Store(!d.expanded.Load())
 	d.showBand.Store(!d.showBand.Load())
-	d.repaint()
-}
-
-// ToggleWide hands the statistics pane's width to the verdict stream.
-func (d *Display) ToggleWide() {
-	d.wide.Store(!d.wide.Load())
 	d.repaint()
 }
 
@@ -441,19 +478,25 @@ func bar(frac float64, width int) string {
 	return b.String()
 }
 
-// maxUIWidth caps how wide the interactive views draw.
-//
-// A 300-column terminal is not a reason to draw a 100-cell progress bar, or to
-// push a size column three hundred cells away from the bar it belongs to. The
-// eye cannot associate them at that distance, and every row becomes a scan rather
-// than a glance. Output that is not part of the UI, the verdict lines above,
-// still uses the full width.
-const maxUIWidth = 132
+// The frame fills the terminal. What gets capped is the elements inside it: a
+// 300-column terminal is not a reason to draw a 100-cell progress bar, or to
+// push a size column three hundred cells from the bar it belongs to, because
+// the eye cannot associate them across that gap. Capping the frame instead
+// leaves a band of dead terminal down one side, which is worse.
+const (
+	maxBarWidth   = 48
+	maxStatsWidth = 38
+	maxPathWidth  = 72
+)
+
+func capAt(v, max int) int {
+	if v > max {
+		return max
+	}
+	return v
+}
 
 func uiWidth(cols int) int {
-	if cols > maxUIWidth {
-		return maxUIWidth
-	}
 	if cols < 20 {
 		return 20
 	}
@@ -548,7 +591,7 @@ func (d *Display) slotRow(i int, s *slot, cols int) string {
 	sizeStr := humanBytes(size)
 	// Fixed columns first, filename gets whatever is left.
 	fixed := len([]rune(label)) + bw + len(" 100%  ") + sizeW + 2
-	nameW := cols - 1 - fixed
+	nameW := capAt(cols-1-fixed, maxPathWidth)
 	if nameW < 8 {
 		nameW = 8
 	}
@@ -563,4 +606,111 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// recentLine is one rendered output line plus the outcome it belongs to.
+type recentLine struct {
+	outcome Outcome
+	text    string
+}
+
+// Panes the arrow keys can act on.
+const (
+	focusStream int32 = iota
+	focusStats
+	focusBand
+	focusCount
+)
+
+// statFilters are the counters the statistics pane offers, in the order they
+// are drawn. The first is "everything", so there is always a way back.
+var statFilters = []struct {
+	label string
+	all   bool
+	out   Outcome
+}{
+	{label: "everything", all: true},
+	{label: "verified", out: OutcomeOK},
+	{label: "mismatched", out: OutcomeMismatch},
+	{label: "missing", out: OutcomeMissing},
+	{label: "io errors", out: OutcomeIOError},
+}
+
+// CycleFocus moves the arrow keys to the next pane. The band is skipped while
+// it is hidden, so tab never parks focus somewhere invisible.
+func (d *Display) CycleFocus() {
+	next := (d.focus.Load() + 1) % focusCount
+	if next == focusBand && !d.showBand.Load() {
+		next = focusStream
+	}
+	d.focus.Store(next)
+	d.repaint()
+}
+
+// Scroll moves whatever has focus.
+func (d *Display) Scroll(n int) {
+	switch d.focus.Load() {
+	case focusStats:
+		sel := d.statSel.Load() + int32(n)
+		if sel < 0 {
+			sel = 0
+		}
+		if int(sel) >= len(statFilters) {
+			sel = int32(len(statFilters) - 1)
+		}
+		d.statSel.Store(sel)
+	case focusBand:
+		d.selectBy(n, false)
+		return
+	default:
+		off := d.streamOff.Load() - int64(n)
+		if off < 0 {
+			off = 0
+		}
+		d.mu.Lock()
+		max := int64(len(d.recent))
+		d.mu.Unlock()
+		if off > max {
+			off = max
+		}
+		d.streamOff.Store(off)
+	}
+	d.repaint()
+}
+
+// ScrollHome and ScrollEnd jump the focused pane to its ends.
+func (d *Display) ScrollHome() {
+	switch d.focus.Load() {
+	case focusStats:
+		d.statSel.Store(0)
+	case focusBand:
+		d.selectBy(0, true)
+		return
+	default:
+		d.mu.Lock()
+		max := int64(len(d.recent))
+		d.mu.Unlock()
+		d.streamOff.Store(max)
+	}
+	d.repaint()
+}
+
+func (d *Display) ScrollEnd() {
+	switch d.focus.Load() {
+	case focusStats:
+		d.statSel.Store(int32(len(statFilters) - 1))
+	case focusBand:
+		d.selectBy(1<<30, true)
+		return
+	default:
+		d.streamOff.Store(0)
+	}
+	d.repaint()
+}
+
+// filter is the outcome the stream and the problem list are limited to, and
+// whether any limit applies at all.
+func (d *Display) filter() (Outcome, bool) {
+	f := statFilters[int(d.statSel.Load())%len(statFilters)]
+	return f.out, !f.all
 }

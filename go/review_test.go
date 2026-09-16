@@ -185,7 +185,7 @@ func TestDecodeKey(t *testing.T) {
 		{[]byte("q"), keyQuit},
 		{[]byte("p"), keyPause},
 		{[]byte(" "), keyBand},
-		{[]byte("\t"), keyWide},
+		{[]byte("\t"), keyFocus},
 		// A bare ESC is not quit. It is the first byte of every arrow key, and
 		// a short read would otherwise end the session on an arrow press.
 		{[]byte("\x1b"), keyNone},

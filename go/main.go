@@ -364,9 +364,9 @@ func run(argv []string, stdout, stderr *os.File) int {
 	// early ones so two runs over one tree produce diffable output without
 	// giving up liveness.
 	var counts Counters
-	emit := func(lines []string) {
+	emit := func(v Verdict, lines []string) {
 		if disp != nil {
-			disp.Commit(lines)
+			disp.CommitVerdict(v, lines)
 			return
 		}
 		for _, l := range lines {
@@ -388,7 +388,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 				continue // never reached; counted below
 			}
 			counts.Add(nv)
-			emit(nv.Render(c))
+			emit(nv, nv.Render(c))
 		}
 	}
 	// Anything still buffered belongs to an interrupted run: its index never
@@ -404,7 +404,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 			continue
 		}
 		counts.Add(v)
-		emit(v.Render(c))
+		emit(v, v.Render(c))
 	}
 	counts.Unreached = len(w.Files) - counts.Scanned
 

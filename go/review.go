@@ -219,21 +219,21 @@ func readKeys(d *Display) {
 		case keyQuit:
 			return
 		case keyUp:
-			d.Move(-1)
+			d.Scroll(-1)
 		case keyDown:
-			d.Move(1)
+			d.Scroll(1)
 		case keyPageUp:
-			d.Move(-10)
+			d.Scroll(-10)
 		case keyPageDown:
-			d.Move(10)
+			d.Scroll(10)
 		case keyHome:
-			d.SelectFirst()
+			d.ScrollHome()
 		case keyEnd:
-			d.SelectLast()
+			d.ScrollEnd()
 		case keyBand:
 			d.ToggleExpanded()
-		case keyWide:
-			d.ToggleWide()
+		case keyFocus:
+			d.CycleFocus()
 		}
 	}
 }
@@ -251,7 +251,7 @@ const (
 	keyQuit
 	keyPause
 	keyBand
-	keyWide
+	keyFocus
 )
 
 // decodeKey handles the arrow keys, which arrive as escape sequences rather
@@ -292,7 +292,7 @@ func decodeKey(b []byte) key {
 		case ' ':
 			return keyBand
 		case '\t':
-			return keyWide
+			return keyFocus
 		case 'q', 'Q', 3, 4:
 			return keyQuit
 		}

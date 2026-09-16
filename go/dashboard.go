@@ -111,41 +111,31 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 		bodyH = 1
 	}
 
-	wide := d.wide.Load()
-	split := cols * 3 / 5
+	statsW := capAt(cols*2/5, maxStatsWidth)
+	if statsW < 24 {
+		statsW = 24
+	}
+	split := cols - statsW - 2
 	if split < 24 {
 		split = 24
+		statsW = cols - split - 2
 	}
-	if split > cols-26 {
-		split = cols - 26
-	}
-	statsW := cols - split - 2
 
 	out := make([]string, 0, rows)
-	joins := map[int]string{}
-	if !wide {
-		joins[split-1] = bTT
-	}
-	out = append(out, hrule(bTL, bTR, cols, d.title(done), joins))
+	out = append(out, hrule(bTL, bTR, cols,
+		focusMark(d.title(done), d.focus.Load() == focusStream),
+		map[int]string{split - 1: bTT}))
 
 	left := d.leftPane(bodyH, split-1, done)
-	if wide {
-		for i := 0; i < bodyH; i++ {
-			out = append(out, boxRow(cols, rowAt(left, i)))
-		}
-	} else {
-		right := d.statsLines(statsW, bodyH, st, done)
-		for i := 0; i < bodyH; i++ {
-			out = append(out, splitRow(cols, split, rowAt(left, i), rowAt(right, i)))
-		}
+	right := d.statsLines(statsW, bodyH, st, done)
+	for i := 0; i < bodyH; i++ {
+		out = append(out, splitRow(cols, split, rowAt(left, i), rowAt(right, i)))
 	}
 
-	bandJoins := map[int]string{}
-	if !wide {
-		bandJoins[split-1] = bBT
-	}
+	bandJoins := map[int]string{split - 1: bBT}
 	if showBand {
-		out = append(out, hrule(bLT, bRT, cols, d.bandTitle(done), bandJoins))
+		out = append(out, hrule(bLT, bRT, cols,
+			focusMark(d.bandTitle(done), d.focus.Load() == focusBand), bandJoins))
 		for _, row := range band {
 			out = append(out, boxRow(cols, row))
 		}
@@ -226,7 +216,24 @@ func (d *Display) bandRows(cols int) []string {
 	if res.counts == nil || len(res.counts.Failures) == 0 {
 		return nil
 	}
+	// Limited to the selected counter, so picking "mismatched" in the
+	// statistics pane narrows the list to the files that matter rather than
+	// only recolouring a number.
 	fs := res.counts.Failures
+	if want, filtered := d.filter(); filtered {
+		kept := make([]Failure, 0, len(fs))
+		for _, f := range fs {
+			if f.Outcome == want {
+				kept = append(kept, f)
+			}
+		}
+		if len(kept) > 0 {
+			fs = kept
+			if sel >= len(fs) {
+				sel = len(fs) - 1
+			}
+		}
+	}
 
 	// A window that keeps the selection visible, so the keys move something
 	// the reader can see.
@@ -372,14 +379,33 @@ func (d *Display) renderTooSmall(rows, cols int) []string {
 // recentLines is the verdict stream, newest at the bottom so it reads the way
 // a scrolling log does.
 func (d *Display) recentLines(h int) []string {
+	want, filtered := d.filter()
 	d.mu.Lock()
-	rec := make([]string, len(d.recent))
-	copy(rec, d.recent)
+	rec := make([]string, 0, len(d.recent))
+	for _, l := range d.recent {
+		if filtered && l.outcome != want {
+			continue
+		}
+		rec = append(rec, l.text)
+	}
 	d.mu.Unlock()
 
-	if len(rec) > h {
-		rec = rec[len(rec)-h:]
+	// Scrolled back from the newest line, so the stream can be read rather
+	// than only watched.
+	off := int(d.streamOff.Load())
+	if off > len(rec) {
+		off = len(rec)
 	}
+	end := len(rec) - off
+	if end < 0 {
+		end = 0
+	}
+	start := end - h
+	if start < 0 {
+		start = 0
+	}
+	rec = rec[start:end]
+
 	out := make([]string, h)
 	for i := range out {
 		out[i] = ""
@@ -399,13 +425,7 @@ func (d *Display) recentLines(h int) []string {
 // spacers go first, and what survives is drawn in its original order.
 func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 	c := d.c
-	pair := func(label, value string) string {
-		gap := w - 2 - len(label) - visibleLen(value)
-		if gap < 1 {
-			gap = 1
-		}
-		return " " + label + strings.Repeat(" ", gap) + value
-	}
+	pair := func(label, value string) string { return "  " + pairIn(label, value, w-4) }
 	mism := itoa(int(st.mismatch))
 	if st.mismatch > 0 {
 		mism = c.red(mism + " corrupt")
@@ -416,16 +436,37 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 		text string
 		prio int
 	}
-	rows := []row{
-		{"", 2},
-		{pair("verified", c.green(itoa(int(st.ok)))), 0},
-		{pair("mismatched", mism), 0},
-		{pair("missing", itoa(int(st.missing))), 1},
-		{pair("io errors", itoa(int(st.ioerr))), 1},
-		{"", 2},
+	focused := d.focus.Load() == focusStats
+	sel := int(d.statSel.Load())
+	// Marked rather than merely coloured: the selected filter has to be
+	// readable at a glance from across the pane, including when the pane does
+	// not have focus and nothing is highlighted.
+	mark := func(i int, text string) string {
+		switch {
+		case i != sel:
+			return "  " + text
+		case focused:
+			return c.cyan("▸") + " " + text
+		default:
+			return c.dim("▸") + " " + text
+		}
+	}
+	counts := []string{
+		"", itoa(int(st.ok)), mism, itoa(int(st.missing)), itoa(int(st.ioerr)),
+	}
+	rows := []row{{"", 2}}
+	for i, f := range statFilters {
+		label, value := f.label, counts[i]
+		if f.all {
+			value = itoa(int(st.doneFiles))
+		}
+		rows = append(rows, row{mark(i, pairIn(label, value, w-4)), 0})
+	}
+	rows = append(rows, row{"", 2})
+	rows = append(rows, []row{
 		{pair("files", fmt.Sprintf("%d / %d", st.doneFiles, d.total)), 0},
 		{pair("data", fmt.Sprintf("%s / %s", humanBytes(st.doneBytes), humanBytes(d.totalBytes))), 1},
-	}
+	}...)
 	if done {
 		// An estimate and an instantaneous rate describe work still to come.
 		// Once there is none, the honest readings are what it took and what
@@ -464,27 +505,63 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 // bottomLine is the progress bar while scanning and the summary afterwards,
 // each with the keys that apply in that state.
 func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
+	hint := d.hintText(done, st.paused)
+	var lead string
 	if done {
-		return d.summaryLine(w)
+		lead = d.summaryText()
+	} else {
+		pct := fmt.Sprintf(" %3.0f%% ", st.frac*100)
+		if st.paused {
+			pct = " " + d.c.yellow("PAUSED") + " "
+		}
+		barW := capAt(w-visibleLen(hint)-visibleLen(pct)-3, maxBarWidth)
+		if barW < 4 {
+			return truncVisible(" "+pct+hint, w)
+		}
+		lead = " " + d.c.cyan(bar(st.frac, barW)) + pct
 	}
-	hint := "[space] workers  [tab] wide  [p] pause  [q] quit"
-	if st.paused {
-		hint = "[p] resume  [q] quit"
+	if pad := w - visibleLen(lead) - visibleLen(hint); pad > 0 {
+		return lead + strings.Repeat(" ", pad) + d.c.dim(hint)
 	}
-	pct := fmt.Sprintf(" %3.0f%% ", st.frac*100)
-	if st.paused {
-		pct = " " + d.c.yellow("PAUSED") + " "
+	return truncVisible(lead+" "+d.c.dim(hint), w)
+}
+
+// hintText names every key that does something right now, in both states of
+// the run. A binding that works but is never offered may as well not exist.
+func (d *Display) hintText(done, paused bool) string {
+	what := "scroll"
+	switch d.focus.Load() {
+	case focusStats:
+		what = "filter"
+	case focusBand:
+		if done {
+			what = "problem"
+		} else {
+			what = "worker"
+		}
 	}
-	barW := w - len(hint) - visibleLen(pct) - 3
-	if barW < 4 {
-		return truncVisible(" "+pct+hint, w)
+	keys := "[tab] focus  [↑↓] " + what + "  [space] band  "
+	if !done {
+		if paused {
+			keys += "[p] resume  "
+		} else {
+			keys += "[p] pause  "
+		}
 	}
-	return " " + d.c.cyan(bar(st.frac, barW)) + pct + d.c.dim(hint)
+	return keys + "[q] quit"
+}
+
+// focusMark brightens the title of whichever pane the arrow keys act on.
+func focusMark(title string, focused bool) string {
+	if focused {
+		return "▸ " + title
+	}
+	return title
 }
 
 // summaryLine is the whole run in one row. Nothing is written to stdout in
 // this mode, so this is the only place the counters appear.
-func (d *Display) summaryLine(w int) string {
+func (d *Display) summaryText() string {
 	d.mu.Lock()
 	res := d.res
 	sel := d.sel
@@ -503,13 +580,18 @@ func (d *Display) summaryLine(w int) string {
 	if n.Unreached > 0 {
 		left += " · " + d.c.yellow(itoa(n.Unreached)+" not reached")
 	}
-	right := fmtDur(res.elapsed) + " · "
+	left += " · " + fmtDur(res.elapsed)
 	if total := len(n.Failures); total > 0 {
-		right += fmt.Sprintf("%d/%d · ", sel+1, total)
+		left += fmt.Sprintf(" · %d/%d", sel+1, total)
 	}
-	right += d.c.dim("[↑↓] move  [q] quit")
-	if pad := w - visibleLen(left) - visibleLen(right) - 1; pad > 0 {
-		return left + strings.Repeat(" ", pad) + right + " "
+	return left
+}
+
+// pairIn lays a label against a right-aligned value inside a given width.
+func pairIn(label, value string, w int) string {
+	gap := w - 2 - len(label) - visibleLen(value)
+	if gap < 1 {
+		gap = 1
 	}
-	return truncVisible(left, w)
+	return " " + label + strings.Repeat(" ", gap) + value
 }

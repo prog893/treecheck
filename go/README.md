@@ -94,13 +94,24 @@ shifts every row below it.
 
 ## Keys
 
-| key | while scanning | after it finishes |
-|---|---|---|
-| `space` | show or hide the worker rows | show or hide the problem list |
-| `tab` | hand the statistics pane's width to the verdict stream | same |
-| `p` | pause the hashing | |
-| `↑ ↓` `j k` `g` `G` | | move through the problems |
-| `q` | stop and exit | exit |
+| key | does |
+|---|---|
+| `tab` | move focus between the verdict stream, the counters and the band |
+| `↑ ↓` `j k` `g` `G` | act on the focused pane |
+| `space` | show or hide the band |
+| `p` | pause the hashing |
+| `q` | stop and exit |
+
+One set of arrow keys, doing different things depending on where focus is,
+rather than a key per pane. With the **stream** focused they scroll the verdict
+log, so a long run can be read rather than only watched. With the **counters**
+focused they pick one, which filters both the stream and the band to that
+category: selecting `mismatched` narrows the problem list to the files that
+matter instead of only recolouring a number. With the **band** focused they step
+through workers while scanning and through problems afterwards.
+
+The hint row names what the arrows will do right now, which is also how you can
+tell where focus is.
 
 `q` quits at any point. Stopping a scan to look at its partial results is what
 letting it finish is for, and a key labelled quit that instead moves to another
@@ -108,8 +119,19 @@ screen is not one. Ctrl-C behaves the same way.
 
 Pause exists because a long verify saturates the device it is reading, which is
 a problem when that device is also the one an edit is playing back from. Paused
-time is excluded from the rate and the estimate: a run paused for ten minutes
-has not slowed down, and an estimate that says otherwise is worse than none.
+time is excluded from the estimate, since a run paused for ten minutes has not
+slowed down; the throughput reading is the recent rate rather than the run
+average, so it falls to zero when the work does.
+
+The counters sit on the right and the stream on the left, deliberately. The
+counters are a narrow column of right-aligned numbers; the stream holds long
+variable-width text. Swapping them would put the ragged content against the
+right edge, where it is hardest to scan, and move the numbers away from the
+column the eye already expects them in.
+
+The frame fills the terminal. What is capped is the elements inside it: a
+300-column terminal is not a reason to draw a 100-cell progress bar or to push
+a size column three hundred cells from the bar it belongs to.
 
 ## Reviewing the problems
 

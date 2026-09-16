@@ -125,20 +125,20 @@ func watchKeys(ctx context.Context, d *Display, quit func(), done chan<- struct{
 			d.TogglePause()
 		case keyBand:
 			d.ToggleExpanded()
-		case keyWide:
-			d.ToggleWide()
+		case keyFocus:
+			d.CycleFocus()
 		case keyUp:
-			d.Move(-1)
+			d.Scroll(-1)
 		case keyDown:
-			d.Move(1)
+			d.Scroll(1)
 		case keyPageUp:
-			d.Move(-10)
+			d.Scroll(-10)
 		case keyPageDown:
-			d.Move(10)
+			d.Scroll(10)
 		case keyHome:
-			d.SelectFirst()
+			d.ScrollHome()
 		case keyEnd:
-			d.SelectLast()
+			d.ScrollEnd()
 		}
 	}
 }

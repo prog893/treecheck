@@ -39,13 +39,13 @@ func fakeDisplay(jobs int) *Display {
 		s.size.Store(int64(21*gib/10) >> uint(i%3))
 		s.done.Store(s.size.Load() * int64(20+i*17) / 100)
 	}
-	d.recent = []string{
-		"ok       /Volumes/Media/A008_07091214_C068.braw",
-		"ok       /Volumes/Media/A008_07091214_C069.braw",
-		"MISMATCH /Volumes/Media/A008_07091214_C070.braw",
-		"         recorded 8516299eda3b1cf414041e1e695c9338692dee6af8de11ec68000bde8ebdf0fd",
-		"         now      b6f00f283e24783b68eb63deb8c6f492dfafd29a45a11fa7c2725869596f81f4",
-		"ok       /Volumes/Media/B002_0709_C002.mov",
+	d.recent = []recentLine{
+		{OutcomeOK, "ok       /Volumes/Media/A008_07091214_C068.braw"},
+		{OutcomeOK, "ok       /Volumes/Media/A008_07091214_C069.braw"},
+		{OutcomeMismatch, "MISMATCH /Volumes/Media/A008_07091214_C070.braw"},
+		{OutcomeMismatch, "         recorded 8516299eda3b1cf414041e1e695c9338692dee6af8de11ec68000bde8ebdf0fd"},
+		{OutcomeMismatch, "         now      b6f00f283e24783b68eb63deb8c6f492dfafd29a45a11fa7c2725869596f81f4"},
+		{OutcomeOK, "ok       /Volumes/Media/B002_0709_C002.mov"},
 	}
 	d.rateHist = []int64{120, 180, 240, 310, 290, 340, 360, 355, 210, 90, 150, 280, 340, 350}
 	for i := range d.rateHist {
