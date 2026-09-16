@@ -176,3 +176,10 @@ func exactBytes(n int64) string {
 	}
 	return fmt.Sprintf("%s (%d bytes)", humanBytes(n), n)
 }
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

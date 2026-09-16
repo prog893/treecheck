@@ -65,7 +65,12 @@ type Display struct {
 	// statSel picks a counter in the statistics pane, which filters the
 	// stream and the problem list to that category.
 	statSel atomic.Int32
-	gate    *pauseGate
+	// Heights of the panes as last drawn, so a page key moves by what is
+	// actually on screen rather than by a number picked in advance. A page
+	// that is not a screenful is not a page.
+	paneH atomic.Int32
+	bandH atomic.Int32
+	gate  *pauseGate
 
 	// Results, set once when the scan finishes. Guarded by mu. Forensics are
 	// gathered when a problem is first selected rather than during the run,
@@ -217,8 +222,15 @@ func (d *Display) sampleRate() {
 	if dt < 0.5 {
 		return
 	}
-	// Sampled whether or not the run is paused, so the recent rate decays to
-	// zero rather than freezing at whatever it was when the pause began.
+	if d.gate != nil && d.gate.paused() {
+		// Frozen, not sampled as zero. The sparkline exists to show how the
+		// device behaved, and a long pause would push every real sample off
+		// the end and leave a flat line saying nothing about the run. The
+		// throughput reading is reported as zero separately, which is the
+		// number that should track reality moment to moment.
+		d.lastT, d.lastB = now, seen
+		return
+	}
 	// Sampled whether or not the run is paused, so the recent rate decays to
 	// zero instead of freezing at whatever it was when the pause began.
 	d.rateHist = append(d.rateHist, int64(float64(seen-d.lastB)/dt))
@@ -394,10 +406,19 @@ func (d *Display) commit(o Outcome, lines []string) {
 	}
 }
 
-// ToggleExpanded shows or hides the lower band.
+// ToggleExpanded shows or hides the worker rows, and does nothing once the
+// scan has finished: the band then holds the problems, which are what the
+// screen exists to show.
 func (d *Display) ToggleExpanded() {
+	if d.done.Load() {
+		return
+	}
 	d.expanded.Store(!d.expanded.Load())
 	d.showBand.Store(!d.showBand.Load())
+	// Focus cannot stay on a pane that is no longer drawn.
+	if !d.showBand.Load() && d.focus.Load() == focusBand {
+		d.focus.Store(focusStream)
+	}
 	d.repaint()
 }
 
@@ -639,12 +660,48 @@ var statFilters = []struct {
 // CycleFocus moves the arrow keys to the next pane. The band is skipped while
 // it is hidden, so tab never parks focus somewhere invisible.
 func (d *Display) CycleFocus() {
-	next := (d.focus.Load() + 1) % focusCount
-	if next == focusBand && !d.showBand.Load() {
-		next = focusStream
+	next := d.focus.Load()
+	// At most one full cycle: if nothing else is focusable, focus stays put.
+	for i := int32(0); i < focusCount; i++ {
+		next = (next + 1) % focusCount
+		if d.focusable(next) {
+			break
+		}
 	}
 	d.focus.Store(next)
 	d.repaint()
+}
+
+// focusable reports whether a pane is drawn and has something to point at. A
+// clean run's band holds no problems, so tab must not offer it: a focus you
+// cannot see and keys that do nothing is worse than two panes.
+func (d *Display) focusable(f int32) bool {
+	switch f {
+	case focusBand:
+		if !d.showBand.Load() {
+			return false
+		}
+		if !d.done.Load() {
+			return len(d.slots) > 0
+		}
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.res.counts != nil && len(d.res.counts.Failures) > 0
+	default:
+		return true
+	}
+}
+
+// pageSize is one screenful of whatever has focus.
+func (d *Display) pageSize() int {
+	h := int(d.paneH.Load())
+	if d.focus.Load() == focusBand {
+		h = int(d.bandH.Load())
+	}
+	if h < 1 {
+		h = 1
+	}
+	return h
 }
 
 // Scroll moves whatever has focus.

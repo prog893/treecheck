@@ -349,12 +349,11 @@ func run(argv []string, stdout, stderr *os.File) int {
 	}
 
 	if o.jobs > 1 {
-		line := fmt.Sprintf("Hashing with %d parallel workers...", o.jobs)
-		if disp != nil {
-			disp.Commit([]string{line})
-		} else {
-			out("%s\n", line)
-		}
+		// Not in the full-screen view: the frame's title already names the
+		// worker count, and repeating it in the verdict stream says the same
+		// thing twice in the same glance. A log has no frame, and this line is
+		// what records how the run was parallelised.
+		out("Hashing with %d parallel workers...\n", o.jobs)
 	}
 
 	verdicts := runWorkers(ctx, w.Files, o, disp, gate)

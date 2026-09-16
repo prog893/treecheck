@@ -223,9 +223,9 @@ func readKeys(d *Display) {
 		case keyDown:
 			d.Scroll(1)
 		case keyPageUp:
-			d.Scroll(-10)
+			d.Scroll(-d.pageSize())
 		case keyPageDown:
-			d.Scroll(10)
+			d.Scroll(d.pageSize())
 		case keyHome:
 			d.ScrollHome()
 		case keyEnd:

@@ -96,11 +96,21 @@ shifts every row below it.
 
 | key | does |
 |---|---|
-| `tab` | move focus between the verdict stream, the counters and the band |
-| `↑ ↓` `j k` `g` `G` | act on the focused pane |
-| `space` | show or hide the band |
+| `tab` | move focus to the next pane that is actually drawn |
+| `↑ ↓` `j k` | act on the focused pane |
+| `PgUp` `PgDn` | the same, by one screenful of that pane |
+| `g` `G` | jump to the ends |
+| `space` | show or hide the worker rows (while scanning) |
 | `p` | pause the hashing |
 | `q` | stop and exit |
+
+Three marks, one role each, so a reader never has to work out which is which:
+
+| mark | means |
+|---|---|
+| highlighted border segment | this pane has the keys |
+| `▸` in the row gutter | this row is where the keys are pointing |
+| gutter space beside it | reserved for selection, once there is something to select |
 
 One set of arrow keys, doing different things depending on where focus is,
 rather than a key per pane. With the **stream** focused they scroll the verdict

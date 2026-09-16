@@ -110,6 +110,13 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 	if bodyH < 1 {
 		bodyH = 1
 	}
+	// What the body height would be with the band showing, which is what the
+	// statistics pane is laid out against so it does not change when the band
+	// is toggled.
+	bodyWithBand := rows - (1 + 1 + len(band) + 1 + 1 + 1)
+	if bodyWithBand < 1 {
+		bodyWithBand = 1
+	}
 
 	statsW := capAt(cols*2/5, maxStatsWidth)
 	if statsW < 24 {
@@ -121,21 +128,30 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 		statsW = cols - split - 2
 	}
 
+	focus := d.focus.Load()
 	out := make([]string, 0, rows)
-	out = append(out, hrule(bTL, bTR, cols,
-		focusMark(d.title(done), d.focus.Load() == focusStream),
-		map[int]string{split - 1: bTT}))
+	out = append(out, colorRuleHalves(
+		hrule(bTL, bTR, cols, d.title(done), map[int]string{split - 1: bTT}),
+		split-1, d.c, focus == focusStream, focus == focusStats))
 
+	// The statistics are laid out for the height they would have with the band
+	// showing, whichever way the band is actually set. Otherwise hiding the
+	// worker rows hands the pane more room and it grows a couple of counters
+	// back, so a key about workers silently changes which statistics exist.
+	// Only the stream takes the slack.
 	left := d.leftPane(bodyH, split-1, done)
-	right := d.statsLines(statsW, bodyH, st, done)
+	right := d.statsLines(statsW, minInt(bodyH, bodyWithBand), st, done)
 	for i := 0; i < bodyH; i++ {
 		out = append(out, splitRow(cols, split, rowAt(left, i), rowAt(right, i)))
 	}
 
 	bandJoins := map[int]string{split - 1: bBT}
 	if showBand {
-		out = append(out, hrule(bLT, bRT, cols,
-			focusMark(d.bandTitle(done), d.focus.Load() == focusBand), bandJoins))
+		rule := hrule(bLT, bRT, cols, d.bandTitle(done), bandJoins)
+		if focus == focusBand {
+			rule = d.c.cyan(rule)
+		}
+		out = append(out, rule)
 		for _, row := range band {
 			out = append(out, boxRow(cols, row))
 		}
@@ -143,6 +159,10 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 	} else {
 		out = append(out, hrule(bLT, bRT, cols, "", bandJoins))
 	}
+
+	// Recorded for the page keys, which move by what is on screen.
+	d.paneH.Store(int32(bodyH))
+	d.bandH.Store(int32(len(band)))
 
 	out = append(out, boxRow(cols, d.bottomLine(cols-2, st, done)))
 	out = append(out, hrule(bBL, bBR, cols, "", nil))
@@ -253,10 +273,7 @@ func (d *Display) bandRows(cols int) []string {
 	rows := make([]string, 0, h)
 	for i := start; i < start+h; i++ {
 		f := fs[i]
-		marker := "  "
-		if i == sel {
-			marker = d.c.cyan("▸ ")
-		}
+		marker := rowCursor(d.c, i == sel)
 		tok := padRight(f.Token, verdictWidth)
 		switch f.Outcome {
 		case OutcomeMismatch:
@@ -442,14 +459,10 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 	// readable at a glance from across the pane, including when the pane does
 	// not have focus and nothing is highlighted.
 	mark := func(i int, text string) string {
-		switch {
-		case i != sel:
-			return "  " + text
-		case focused:
-			return c.cyan("▸") + " " + text
-		default:
-			return c.dim("▸") + " " + text
+		if i == sel && !focused {
+			return c.dim(cursorMark) + cursorGap + text
 		}
+		return rowCursor(c, i == sel) + text
 	}
 	counts := []string{
 		"", itoa(int(st.ok)), mism, itoa(int(st.missing)), itoa(int(st.ioerr)),
@@ -486,6 +499,9 @@ func (d *Display) statsLines(w, h int, st statsSnapshot, done bool) []string {
 		)
 	}
 
+	// Spacers go first, then the least load-bearing numbers, so a genuinely
+	// short terminal still shows the counters that cannot be reconstructed
+	// from anywhere else.
 	drop := len(rows) - h
 	for prio := 2; prio >= 1 && drop > 0; prio-- {
 		for i := len(rows) - 1; i >= 0 && drop > 0; i-- {
@@ -526,8 +542,9 @@ func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
 	return truncVisible(lead+" "+d.c.dim(hint), w)
 }
 
-// hintText names every key that does something right now, in both states of
-// the run. A binding that works but is never offered may as well not exist.
+// hintText names every key that does something right now, and only those. A
+// binding that works but is never offered may as well not exist; one that is
+// offered but does nothing is worse.
 func (d *Display) hintText(done, paused bool) string {
 	what := "scroll"
 	switch d.focus.Load() {
@@ -540,8 +557,15 @@ func (d *Display) hintText(done, paused bool) string {
 			what = "worker"
 		}
 	}
-	keys := "[tab] focus  [↑↓] " + what + "  [space] band  "
+	keys := "[tab] focus  [↑↓] " + what + "  "
 	if !done {
+		// Only offered while there are workers to hide. After the scan the
+		// band holds the problems, which are the point of the screen.
+		if d.showBand.Load() {
+			keys += "[space] hide workers  "
+		} else {
+			keys += "[space] show workers  "
+		}
 		if paused {
 			keys += "[p] resume  "
 		} else {
@@ -551,12 +575,28 @@ func (d *Display) hintText(done, paused bool) string {
 	return keys + "[q] quit"
 }
 
-// focusMark brightens the title of whichever pane the arrow keys act on.
-func focusMark(title string, focused bool) string {
-	if focused {
-		return "▸ " + title
+// Marks, one role each, so a reader never has to work out which is which:
+//
+//	border segment highlighted   this pane has the keys
+//	cursor (▸)                   this row is where the keys are pointing
+//	gutter (reserved)            selection, once there is something to select
+//
+// A future multi-select needs a mark of its own, and it cannot be either of
+// the two above, so the row gutter is laid out with room for it already.
+const (
+	cursorMark = "▸"
+	cursorGap  = " "
+	// gutterWidth is the cursor plus its gap. Every row in a selectable list
+	// reserves it, selected or not, so nothing shifts as the cursor moves.
+	gutterWidth = 2
+)
+
+// rowCursor renders a list row's gutter.
+func rowCursor(c *colors, isCursor bool) string {
+	if isCursor {
+		return c.cyan(cursorMark) + cursorGap
 	}
-	return title
+	return " " + cursorGap[:1]
 }
 
 // summaryLine is the whole run in one row. Nothing is written to stdout in
@@ -594,4 +634,22 @@ func pairIn(label, value string, w int) string {
 		gap = 1
 	}
 	return " " + label + strings.Repeat(" ", gap) + value
+}
+
+// colorRuleHalves highlights the half of a shared rule that belongs to the
+// focused pane. The rule spans both panes, so colouring the whole thing would
+// say nothing about which one has the keys.
+func colorRuleHalves(rule string, at int, c *colors, leftFocused, rightFocused bool) string {
+	if !leftFocused && !rightFocused {
+		return rule
+	}
+	r := []rune(rule)
+	if at < 1 || at >= len(r)-1 {
+		return rule
+	}
+	left, right := string(r[:at+1]), string(r[at+1:])
+	if leftFocused {
+		return c.cyan(left) + right
+	}
+	return left + c.cyan(right)
 }
