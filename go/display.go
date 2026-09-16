@@ -80,6 +80,9 @@ type Display struct {
 	forensics map[int]forensics
 	// final is the last live reading, taken when the scan ended.
 	final *statsSnapshot
+	// The estimate as last shown, and when it was computed.
+	etaText string
+	etaAt   time.Time
 
 	// Descriptive fields for the dashboard header, fixed for the run.
 	root string
@@ -203,18 +206,34 @@ func (d *Display) snapshot() statsSnapshot {
 	if st.paused {
 		st.rate = 0
 	}
-	st.eta = "--"
-	if st.average > 0 && d.totalBytes > 0 {
-		if remain := d.totalBytes - seen; remain > 0 {
-			st.eta = fmtDur(remain / st.average)
-		} else {
-			st.eta = "0s"
-		}
-	}
+	st.eta = d.estimate(seen, st.average)
 	d.mu.Lock()
 	st.hist = append([]int64(nil), d.rateHist...)
 	d.mu.Unlock()
 	return st
+}
+
+// etaEvery is how often the estimate may change. Recomputed every frame from a
+// rate that moves every frame, it flickered between neighbouring values faster
+// than it could be read, which made it look less certain than it is.
+const etaEvery = 2 * time.Second
+
+func (d *Display) estimate(seen, average int64) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.etaText != "" && time.Since(d.etaAt) < etaEvery {
+		return d.etaText
+	}
+	eta := "--"
+	if average > 0 && d.totalBytes > 0 {
+		if remain := d.totalBytes - seen; remain > 0 {
+			eta = fmtDur(remain / average)
+		} else {
+			eta = "0s"
+		}
+	}
+	d.etaText, d.etaAt = eta, time.Now()
+	return eta
 }
 
 // sampleRate records one point of instantaneous throughput for the sparkline.

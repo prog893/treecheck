@@ -159,17 +159,17 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 		bandBox = len(band) + 2
 	}
 
-	// Each box costs its two rules; the status row costs one.
-	bodyH := rows - bandBox - 2 - 1
+	// Each box costs its two rules; the header and status rows one each.
+	bodyH := rows - bandBox - 2 - 2
 	const minBody = 7
 	if bodyH < minBody && showBand {
 		showBand, bandBox = false, 0
-		bodyH = rows - 2 - 1
+		bodyH = rows - 2 - 2
 	}
 	if bodyH < 1 {
 		bodyH = 1
 	}
-	bodyWithBand := rows - (len(band) + 2) - 2 - 1
+	bodyWithBand := rows - (len(band) + 2) - 2 - 2
 	if bodyWithBand < 1 {
 		bodyWithBand = 1
 	}
@@ -192,9 +192,10 @@ func (d *Display) renderDashboard(rows, cols int) []string {
 	right := d.statsLines(statsW-2, minInt(bodyH, bodyWithBand), st, done)
 
 	out := make([]string, 0, rows)
+	out = append(out, d.headerLine(cols))
 	out = append(out, joinH(
-		pane(d.c, d.title(done), streamW, bodyH, left, focus == focusStream),
-		pane(d.c, "counters", statsW, bodyH, right, focus == focusStats))...)
+		pane(d.c, d.paneTitle(done), streamW, bodyH, left, focus == focusStream),
+		pane(d.c, "stats", statsW, bodyH, right, focus == focusStats))...)
 	if showBand {
 		out = append(out, pane(d.c, d.bandTitle(done), cols, len(band), band,
 			focus == focusBand)...)
@@ -367,9 +368,10 @@ func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
 	if done {
 		lead = d.summaryText()
 	} else {
+		// A paused run still has a position, so the percentage stays.
 		pct := fmt.Sprintf(" %3.0f%% ", st.frac*100)
 		if st.paused {
-			pct = " " + d.c.yellow("PAUSED") + " "
+			pct += d.c.yellow("PAUSED") + " "
 		}
 		if barW := capAt(w/3, maxBarWidth); barW >= 4 {
 			lead = " " + d.c.cyan(bar(st.frac, barW)) + pct
@@ -379,9 +381,9 @@ func (d *Display) bottomLine(w int, st statsSnapshot, done bool) string {
 	}
 	hint := d.hintText(done, st.paused, w-visibleLen(lead)-2)
 	if pad := w - visibleLen(lead) - visibleLen(hint) - 1; pad > 0 {
-		return lead + strings.Repeat(" ", pad) + d.c.dim(hint)
+		return lead + strings.Repeat(" ", pad) + d.c.dim(hint) + " "
 	}
-	return truncVisible(lead+" "+d.c.dim(hint), w)
+	return padVisible(truncVisible(lead+" "+d.c.dim(hint), w), w)
 }
 
 // hintText names every key that does something right now, and only those. A
@@ -419,19 +421,29 @@ func (d *Display) hintText(done, paused bool, w int) string {
 	}
 	hints = append(hints, hint{"[q] quit", "[q]"})
 
-	// Full labels if they fit, short ones if they do not, then shed from the
-	// front until what is left fits. Quit is last in the list, so it is the
-	// one thing that always survives.
+	// Shortened one at a time from the front, so the least useful label loses
+	// its description first and the rest keep theirs; then dropped from the
+	// front once every label is already short. Quit is last in the list, so
+	// it is the one that always survives, and the last to lose its word.
 	join := func(parts []string) string { return strings.Join(parts, "  ") }
-	full := make([]string, len(hints))
+	for k := 0; k <= len(hints); k++ {
+		parts := make([]string, len(hints))
+		for i, h := range hints {
+			if i < k {
+				parts[i] = h.short
+			} else {
+				parts[i] = h.full
+			}
+		}
+		if candidate := join(parts); visibleLen(candidate) <= w {
+			return candidate
+		}
+	}
 	short := make([]string, len(hints))
 	for i, h := range hints {
-		full[i], short[i] = h.full, h.short
+		short[i] = h.short
 	}
-	if visibleLen(join(full)) <= w {
-		return join(full)
-	}
-	for i := 0; i < len(short); i++ {
+	for i := 1; i < len(short); i++ {
 		if candidate := join(short[i:]); visibleLen(candidate) <= w {
 			return candidate
 		}
@@ -523,29 +535,6 @@ func rowAt(rows []string, i int) string {
 		return rows[i]
 	}
 	return ""
-}
-
-// title names the run while it is running and its outcome once it is not. It
-// lives in the stream pane's own border, since panes no longer share one.
-func (d *Display) title(done bool) string {
-	if !done {
-		workers := "workers"
-		if len(d.slots) == 1 {
-			workers = "worker"
-		}
-		return fmt.Sprintf("%s · %s · %d %s",
-			truncRunes(displayPath(d.root), 32), d.mode, len(d.slots), workers)
-	}
-	d.mu.Lock()
-	res := d.res
-	d.mu.Unlock()
-	if res.counts == nil {
-		return "finished"
-	}
-	if len(res.counts.Failures) == 0 {
-		return statusPhrase(res.status)
-	}
-	return "detail"
 }
 
 func statusPhrase(status int) string {
@@ -725,4 +714,46 @@ func (d *Display) forensicsFor(i int, f Failure) forensics {
 	d.forensics[i] = fo
 	d.mu.Unlock()
 	return fo
+}
+
+// headerLine names the run, above the panes rather than inside one.
+//
+// This was the stream pane's title, where it read as a claim about that pane's
+// contents: "./ · Verify only · 8 workers" describes the run, not the verdict
+// log. A pane title should say what is in the pane.
+func (d *Display) headerLine(w int) string {
+	workers := "workers"
+	if len(d.slots) == 1 {
+		workers = "worker"
+	}
+	name := " " + d.c.cyan("treecheck") + "  "
+	right := fmt.Sprintf("  %s · %d %s ", d.mode, len(d.slots), workers)
+	// The path gives way, from its front, before the mode and worker count
+	// do: the end of a path is the part that names the volume or folder, and
+	// the right-hand side is short and fixed.
+	room := w - visibleLen(name) - visibleLen(right)
+	if room < 8 {
+		return padVisible(truncVisible(name+tailRunes(displayPath(d.root), w), w), w)
+	}
+	path := tailRunes(displayPath(d.root), room)
+	pad := room - visibleLen(path)
+	return name + path + strings.Repeat(" ", pad) + d.c.dim(right)
+}
+
+// paneTitle says what is in the stream pane, which changes with the run's
+// state but is never the name of the run.
+func (d *Display) paneTitle(done bool) string {
+	if !done {
+		return "log"
+	}
+	d.mu.Lock()
+	res := d.res
+	d.mu.Unlock()
+	if res.counts == nil {
+		return "result"
+	}
+	if len(res.counts.Failures) == 0 {
+		return statusPhrase(res.status)
+	}
+	return "detail"
 }

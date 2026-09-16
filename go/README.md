@@ -114,7 +114,7 @@ Three marks, one role each, so a reader never has to work out which is which:
 
 One set of arrow keys, doing different things depending on where focus is,
 rather than a key per pane. With the **stream** focused they scroll the verdict log, so a long run can be
-read rather than only watched. With the **counters** focused they pick one,
+read rather than only watched. With the **stats** focused they pick one,
 which filters both the stream and the band to that category. With the **band**
 focused, once the scan has finished, they step through the problems.
 
@@ -148,7 +148,13 @@ time is excluded from the estimate, since a run paused for ten minutes has not
 slowed down; the throughput reading is the recent rate rather than the run
 average, so it falls to zero when the work does.
 
-The counters sit on the right and the stream on the left, deliberately. The
+A header row above the panes names the run: the target as an absolute path,
+the mode and the worker count. The full-screen view replaces the shell prompt,
+so a relative path loses the directory it was relative to; the path gives way
+from its front when the row is short, since its end names the volume. Verdict
+lines keep the path as given, because they are the same bytes a pipe receives.
+
+The stats sit on the right and the log on the left, deliberately. The
 counters are a narrow column of right-aligned numbers; the stream holds long
 variable-width text. Swapping them would put the ragged content against the
 right edge, where it is hardest to scan, and move the numbers away from the

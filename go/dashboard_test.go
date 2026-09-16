@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -281,5 +282,62 @@ func TestBandNotFocusableWhileScanning(t *testing.T) {
 		if f := d2.focus.Load(); !d2.focusable(f) {
 			t.Fatalf("focus landed on unfocusable pane %d", f)
 		}
+	}
+}
+
+// TestRowsFillTheWidth: every row of the full-screen view is exactly as wide as
+// the terminal, the status row included. A row one cell short leaves the
+// bottom line visibly out of step with the panes above it.
+func TestRowsFillTheWidth(t *testing.T) {
+	for _, cols := range []int{80, 100, 104, 150} {
+		for _, done := range []bool{false, true} {
+			d := fakeDisplay(4)
+			if done {
+				d.ShowResults(results{counts: &Counters{Scanned: 5, OK: 5}})
+			}
+			for i, row := range d.renderDashboard(28, cols) {
+				if w := visibleLen(row); w != cols {
+					t.Errorf("cols=%d done=%v row %d is %d wide: %q", cols, done, i, w, row)
+				}
+			}
+		}
+	}
+}
+
+// TestFullRowKeepsItsLastColumn pins the missing right border. A row that
+// fills the width leaves the cursor on the last column in the pending-wrap
+// state, and an erase-to-end-of-line written after it clears that column.
+func TestFullRowKeepsItsLastColumn(t *testing.T) {
+	var b bytes.Buffer
+	writeRow(&b, strings.Repeat("x", 9)+"│", 10)
+	if strings.Contains(b.String(), "\x1b[K") {
+		t.Errorf("full-width row followed by erase-to-end-of-line: %q", b.String())
+	}
+	b.Reset()
+	writeRow(&b, "short", 10)
+	if !strings.HasSuffix(b.String(), "\x1b[K") {
+		t.Errorf("short row not cleared to the end: %q", b.String())
+	}
+}
+
+// TestPausedKeepsPercentage: a paused run still has a position, and the bar
+// exists to carry it.
+func TestPausedKeepsPercentage(t *testing.T) {
+	d := fakeDisplay(4)
+	d.gate = &pauseGate{}
+	d.gate.toggle()
+	line := d.bottomLine(100, d.snapshot(), false)
+	if !strings.Contains(line, "%") || !strings.Contains(line, "PAUSED") {
+		t.Errorf("paused status row must show both the percentage and PAUSED: %q", line)
+	}
+}
+
+// TestEstimateIsThrottled: recomputed every frame, the estimate flickered
+// between neighbouring values faster than it could be read.
+func TestEstimateIsThrottled(t *testing.T) {
+	d := fakeDisplay(4)
+	first := d.estimate(1<<30, 1<<20)
+	if got := d.estimate(2<<30, 1<<28); got != first {
+		t.Errorf("estimate changed within %v: %q then %q", etaEvery, first, got)
 	}
 }

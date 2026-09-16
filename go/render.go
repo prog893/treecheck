@@ -193,8 +193,7 @@ func (r *Renderer) Commit(lines []string) {
 			writeCSI(&b, "\033[%d;1H", r.footTop)
 			r.footTop++
 		}
-		b.WriteString(truncVisible(l, r.cols))
-		b.WriteString("\033[K")
+		writeRow(&b, l, r.cols)
 	}
 	r.out.Write(b.Bytes())
 	// The block moved, so the cached rows describe rows that now hold output.
@@ -232,8 +231,7 @@ func (r *Renderer) SetFooter(rows []string) {
 			continue
 		}
 		writeCSI(&b, "\033[%d;1H", r.footTop+i)
-		b.WriteString(truncVisible(row, r.cols))
-		b.WriteString("\033[K")
+		writeRow(&b, row, r.cols)
 	}
 	if b.Len() > 0 {
 		r.out.Write(b.Bytes())

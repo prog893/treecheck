@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -226,6 +227,17 @@ func defaultJobs() int {
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
+// absDir is the target as an absolute path, for display. The full-screen view
+// replaces the shell prompt, so a relative path loses the directory it was
+// relative to, and "./" names nothing at all. Verdict lines keep the path as
+// given: they are the same bytes a pipe receives.
+func absDir(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
+
 func run(argv []string, stdout, stderr *os.File) int {
 	o, code := parseArgs(argv, stdout, stderr)
 	if o == nil {
@@ -332,7 +344,7 @@ func run(argv []string, stdout, stderr *os.File) int {
 	var disp *Display
 	if tty && len(w.Files) > 0 {
 		disp = NewDisplay(NewRenderer(stdout), c, o.jobs, len(w.Files), w.Bytes,
-			o.dir, mode, fullScreen)
+			absDir(o.dir), mode, fullScreen)
 		disp.gate = gate
 		disp.Run()
 		// The key watcher gets its own cancellation, separate from the run's.

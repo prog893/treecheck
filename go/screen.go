@@ -86,8 +86,7 @@ func (s *Screen) Draw(frame []string) {
 			continue
 		}
 		b.WriteString(sprintfCSI(i+1, 1))
-		b.WriteString(truncVisible(row, s.cols))
-		b.WriteString("\033[K")
+		writeRow(&b, row, s.cols)
 	}
 	// Clear any rows the previous frame used and this one does not.
 	for i := len(frame); i < len(s.prev); i++ {
@@ -98,6 +97,20 @@ func (s *Screen) Draw(frame []string) {
 		s.out.Write(b.Bytes())
 	}
 	s.prev = append(s.prev[:0], frame...)
+}
+
+// writeRow writes one row, clearing the rest of the line only when the row is
+// short of the width.
+//
+// A row that fills the width leaves the cursor parked on the last column in the
+// pending-wrap state, and erase-to-end-of-line from there clears that column:
+// the right border was drawn and wiped on every row, at every size.
+func writeRow(b *bytes.Buffer, row string, cols int) {
+	row = truncVisible(row, cols)
+	b.WriteString(row)
+	if visibleLen(row) < cols {
+		b.WriteString("\033[K")
+	}
 }
 
 func sprintfCSI(row, col int) string {
