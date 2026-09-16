@@ -364,3 +364,23 @@ func TestFilterValuesAlign(t *testing.T) {
 		}
 	}
 }
+
+// TestVerdictLivesInTheHeader: the run's outcome belongs to the run. In a pane
+// title it read as the name of the log, and written above the log it read as
+// part of the log.
+func TestVerdictLivesInTheHeader(t *testing.T) {
+	d := fakeDisplay(2)
+	d.ShowResults(results{counts: &Counters{Scanned: 5, OK: 5}, status: 0})
+	frame := d.renderDashboard(24, 100)
+	if !strings.Contains(frame[0], "nothing wrong") {
+		t.Errorf("header does not carry the outcome: %q", frame[0])
+	}
+	for i, row := range frame[1:] {
+		if strings.Contains(row, "nothing wrong") || strings.Contains(row, "every file matched") {
+			t.Errorf("outcome leaked into row %d: %q", i+1, row)
+		}
+	}
+	if !strings.Contains(frame[1], bH+" log "+bH) {
+		t.Errorf("log pane retitled after a clean run: %q", frame[1])
+	}
+}

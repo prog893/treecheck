@@ -576,17 +576,25 @@ func rowAt(rows []string, i int) string {
 	return ""
 }
 
-func statusPhrase(status int) string {
-	switch status {
+// outcome is the run's verdict for the header, coloured by severity. It
+// belongs to the run, so it sits with the run's name rather than in a pane,
+// where it read as a title for the log or as a line of the log itself.
+func (d *Display) outcome(res results) string {
+	n := res.counts
+	switch res.status {
 	case 0:
-		return "nothing wrong"
+		return d.c.green("nothing wrong")
 	case 2:
-		return "no usable sidecar"
+		return d.c.yellow(fmt.Sprintf("%d without a usable sidecar", n.Missing))
 	case 130:
-		return "interrupted"
-	default:
-		return "failed"
+		return d.c.yellow("interrupted")
 	}
+	if n != nil {
+		if k := n.Mismatch + n.IOErr + n.Missing; k > 0 {
+			return d.c.red(fmt.Sprintf("%d need attention", k))
+		}
+	}
+	return d.c.red("failed")
 }
 
 func (d *Display) bandTitle(done bool) string {
@@ -674,24 +682,12 @@ func (d *Display) leftPane(h, w int, done bool) []string {
 	d.mu.Lock()
 	res, sel := d.res, d.sel
 	d.mu.Unlock()
+	// With nothing to inspect the pane stays the log it was. The verdict is
+	// in the header, not written over the log's first lines.
 	if res.counts == nil || len(res.counts.Failures) == 0 {
-		return d.cleanPane(h, w, res)
+		return d.recentLines(h)
 	}
 	return d.detailPane(h, w, res, sel)
-}
-
-func (d *Display) cleanPane(h, w int, res results) []string {
-	head := "every file matched its sidecar"
-	switch res.status {
-	case 130:
-		head = d.c.yellow("stopped early; only the files below were checked")
-	case 2:
-		head = d.c.yellow("nothing is corrupt, but some files have no sidecar yet")
-	default:
-		head = d.c.green(head)
-	}
-	out := []string{"", " " + head, ""}
-	return append(out, d.recentLines(h-len(out))...)
 }
 
 func (d *Display) detailPane(h, w int, res results, sel int) []string {
@@ -766,7 +762,14 @@ func (d *Display) headerLine(w int) string {
 		workers = "worker"
 	}
 	name := " " + d.c.cyan("treecheck") + "  "
-	right := fmt.Sprintf("  %s · %d %s ", d.mode, len(d.slots), workers)
+	right := d.c.dim(fmt.Sprintf("%s · %d %s ", d.mode, len(d.slots), workers))
+	if d.done.Load() {
+		d.mu.Lock()
+		res := d.res
+		d.mu.Unlock()
+		right = d.outcome(res) + d.c.dim(" · ") + right
+	}
+	right = "  " + right
 	// The path gives way, from its front, before the mode and worker count
 	// do: the end of a path is the part that names the volume or folder, and
 	// the right-hand side is short and fixed.
@@ -776,7 +779,7 @@ func (d *Display) headerLine(w int) string {
 	}
 	path := tailRunes(displayPath(d.root), room)
 	pad := room - visibleLen(path)
-	return name + path + strings.Repeat(" ", pad) + d.c.dim(right)
+	return name + path + strings.Repeat(" ", pad) + right
 }
 
 // paneTitle says what is in the stream pane, which changes with the run's
@@ -788,11 +791,10 @@ func (d *Display) paneTitle(done bool) string {
 	d.mu.Lock()
 	res := d.res
 	d.mu.Unlock()
-	if res.counts == nil {
-		return "result"
-	}
-	if len(res.counts.Failures) == 0 {
-		return statusPhrase(res.status)
+	// Titled for what the pane holds: the log, unless there is a file to
+	// inspect, in which case it holds that file's evidence.
+	if res.counts == nil || len(res.counts.Failures) == 0 {
+		return "log"
 	}
 	return "detail"
 }

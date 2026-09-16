@@ -78,9 +78,11 @@ survives the screen being restored.
  ██████████▎·············  43%   [space] hide workers  [tab] focus  [↑↓] scroll  [p] pause  [q] quit
 ```
 
-When the scan finishes the frame keeps its shape. The log pane shows the
-evidence for the selected file, the band lists the files that need attention,
-and the bar becomes the summary. A results screen with a different shape makes
+When the scan finishes the frame keeps its shape. The run's outcome joins the
+header, where the run's name is, rather than a pane title or the log itself. If
+any file needs attention, the log pane shows the evidence for the selected one
+and the band lists them; otherwise the log stays the log. The bar becomes the
+summary. A results screen with a different shape makes
 the reader re-find everything at the moment there is something to act on.
 
 ### Keys
