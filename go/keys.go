@@ -26,7 +26,7 @@ func rawMode(f *os.File) (func(), bool) { return rawModeTimed(f, 0) }
 // watcher wants.
 func rawModeTimed(f *os.File, deciseconds uint8) (func(), bool) {
 	var old syscall.Termios
-	if err := ioctlTermios(f.Fd(), syscall.TIOCGETA, &old); err != nil {
+	if err := ioctlTermios(f.Fd(), ioctlGetTermios, &old); err != nil {
 		return func() {}, false
 	}
 	raw := old
@@ -38,7 +38,7 @@ func rawModeTimed(f *os.File, deciseconds uint8) (func(), bool) {
 		raw.Cc[syscall.VMIN] = 1
 		raw.Cc[syscall.VTIME] = 0
 	}
-	if err := ioctlTermios(f.Fd(), syscall.TIOCSETA, &raw); err != nil {
+	if err := ioctlTermios(f.Fd(), ioctlSetTermios, &raw); err != nil {
 		return func() {}, false
 	}
 	restored := false
@@ -47,7 +47,7 @@ func rawModeTimed(f *os.File, deciseconds uint8) (func(), bool) {
 			return
 		}
 		restored = true
-		_ = ioctlTermios(f.Fd(), syscall.TIOCSETA, &old)
+		_ = ioctlTermios(f.Fd(), ioctlSetTermios, &old)
 	}, true
 }
 
