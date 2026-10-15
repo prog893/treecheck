@@ -136,7 +136,7 @@ Each outcome is counted separately, because they mean very different things:
 | **Not verified** | Create mode with `-n`: a sidecar was written but never read back |
 | **I/O errors** | The file or its sidecar could not be read, or the sidecar could not be written |
 
-For a sidecar that already existed, `Verified` means the file was read and hashed and the result matched, and the line reads `ok`. For one this run just created, it means the sidecar was read back and matched the digest written to it, and the line reads `created`. Creation reads each file once.
+For a sidecar that already existed, `Verified` means the file was read and hashed and the result matched, and the line reads `ok`. For one this run just created, the line reads `created`, and it counts as `Verified` only when the sidecar was read back and matched the digest written to it. Under `-c -n` nothing is read back, so those files count as `Not verified` instead. Creation reads each file once.
 
 `Mismatched` and `I/O errors` are deliberately distinct. A mismatch means the bytes changed. An I/O error means the drive would not hand them over, which points at the hardware rather than at the data.
 

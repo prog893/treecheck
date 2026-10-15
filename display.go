@@ -77,7 +77,7 @@ type Display struct {
 	// so a scan pays nothing for a screen it may never show.
 	res       results
 	sel       int
-	forensics map[int]forensics
+	forensics map[string]forensics
 	// final is the last live reading, taken when the scan ended.
 	final *statsSnapshot
 	// The estimate as last shown, and when it was computed.
@@ -95,6 +95,10 @@ type Display struct {
 	rateHist []int64
 	lastB    int64
 	lastT    time.Time
+
+	// paintMu serializes painting. It is never held while composing a frame,
+	// which takes mu.
+	paintMu sync.Mutex
 
 	// rate is smoothed over the whole run rather than sampled per tick: an
 	// instantaneous rate on a mix of huge and tiny files swings hard enough
@@ -307,7 +311,23 @@ func (d *Display) Begin(worker int, path string, size int64) {
 
 func (d *Display) Progress(worker int, done int64) { d.slots[worker].done.Store(done) }
 
+// Abandon releases a worker's row without counting anything. A file the run
+// was cancelled part-way through produced no verdict, and counting it as
+// finished, with the zero Outcome, reported it as verified.
+func (d *Display) Abandon(worker int) {
+	d.slots[worker].active.Store(false)
+	d.slots[worker].path.Store("")
+}
+
 func (d *Display) Finish(worker int, v Verdict) {
+	// A verdict with no token is a file the run was cancelled part-way
+	// through. Counting it as finished, with the zero Outcome, reported it as
+	// verified. Checked here rather than at the call site, so the rule holds
+	// however Finish is reached.
+	if v.Token == "" {
+		d.Abandon(worker)
+		return
+	}
 	d.slots[worker].active.Store(false)
 	d.slots[worker].path.Store("")
 	d.doneFiles.Add(1)
@@ -373,6 +393,12 @@ func (d *Display) Run() {
 // footer, the dashboard holds the alternate buffer, and switching hands the
 // terminal from one to the other rather than layering them.
 func (d *Display) repaint() {
+	// One painter at a time. The frame loop and the key handler both call
+	// this, and they share the screen's cached frame; two of them interleaving
+	// corrupts the diff that decides which rows to write. This is its own
+	// mutex because composing a frame takes d.mu.
+	d.paintMu.Lock()
+	defer d.paintMu.Unlock()
 	if d.dash {
 		// Asked of the terminal every frame, not cached.
 		//
@@ -490,7 +516,7 @@ func (d *Display) selectBy(i int, absolute bool) {
 		return
 	}
 	d.mu.Lock()
-	if total := len(d.res.counts.Failures); total > 0 {
+	if total := len(d.visibleFailuresLocked()); total > 0 {
 		if absolute {
 			d.sel = i
 		} else {
@@ -759,7 +785,7 @@ func (d *Display) focusable(f int32) bool {
 		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		return d.res.counts != nil && len(d.res.counts.Failures) > 0
+		return len(d.visibleFailuresLocked()) > 0
 	default:
 		return true
 	}
@@ -789,11 +815,16 @@ func (d *Display) Scroll(n int) {
 			sel = int32(len(statFilters) - 1)
 		}
 		if sel != d.statSel.Load() {
-			// Back to the newest line. A filter changes how many lines exist,
-			// so an offset carried over from the previous one points at
-			// nothing in particular: the stream appeared to jump, or to empty
-			// itself, with no visible cause.
+			// Back to the newest line and the first file. A filter changes
+			// how many lines and how many files exist, so an offset or an
+			// index carried over from the previous one points at nothing in
+			// particular: the stream appeared to jump, or to empty itself,
+			// with no visible cause, and the selection landed on a file the
+			// list no longer showed.
 			d.streamOff.Store(0)
+			d.mu.Lock()
+			d.sel = 0
+			d.mu.Unlock()
 		}
 		d.statSel.Store(sel)
 	case focusBand:
@@ -821,6 +852,9 @@ func (d *Display) ScrollHome() {
 	case focusStats:
 		d.statSel.Store(0)
 		d.streamOff.Store(0)
+		d.mu.Lock()
+		d.sel = 0
+		d.mu.Unlock()
 	case focusBand:
 		d.selectBy(0, true)
 		return
@@ -838,6 +872,9 @@ func (d *Display) ScrollEnd() {
 	case focusStats:
 		d.statSel.Store(int32(len(statFilters) - 1))
 		d.streamOff.Store(0)
+		d.mu.Lock()
+		d.sel = 0
+		d.mu.Unlock()
 	case focusBand:
 		d.selectBy(1<<30, true)
 		return
@@ -845,6 +882,31 @@ func (d *Display) ScrollEnd() {
 		d.streamOff.Store(0)
 	}
 	d.repaint()
+}
+
+// visibleFailuresLocked is the failure list as filtered, which is what the
+// band lists, what the selection indexes, and what the detail pane reads.
+// Callers hold d.mu.
+//
+// One list for all three. The band used to filter a local copy while the
+// selection still indexed the unfiltered one, so with a filter applied the
+// cursor marked one row and the evidence pane described a different file.
+func (d *Display) visibleFailuresLocked() []Failure {
+	if d.res.counts == nil {
+		return nil
+	}
+	fs := d.res.counts.Failures
+	match, filtered := d.filter()
+	if !filtered {
+		return fs
+	}
+	kept := make([]Failure, 0, len(fs))
+	for _, f := range fs {
+		if match(f.Outcome) {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 // filter is the predicate the stream and the problem list are limited to. The

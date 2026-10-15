@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -382,5 +383,120 @@ func TestVerdictLivesInTheHeader(t *testing.T) {
 	}
 	if !strings.Contains(frame[1], bH+" log "+bH) {
 		t.Errorf("log pane retitled after a clean run: %q", frame[1])
+	}
+}
+
+// failureSet builds a Display showing the given outcomes as its results.
+func failureSet(outcomes ...Outcome) *Display {
+	d := fakeDisplay(2)
+	// Built through Add, which is what a real run uses: it is what appends to
+	// Failures, so filling that field as well would list every file twice.
+	n := &Counters{}
+	for i, o := range outcomes {
+		tok := TokenMismatch
+		switch o {
+		case OutcomeMissing:
+			tok = TokenMissing
+		case OutcomeIOError:
+			tok = TokenIOError
+		}
+		n.Add(Verdict{Path: "/root/f" + itoa(i) + ".bin", Outcome: o, Token: tok})
+	}
+	d.ShowResults(results{counts: n, root: "/root", status: 1})
+	return d
+}
+
+// selectFilter points the filter at a named category.
+func selectFilter(t *testing.T, d *Display, label string) {
+	t.Helper()
+	d.focus.Store(focusStats)
+	for i, f := range statFilters {
+		if f.label == label {
+			d.statSel.Store(int32(i))
+			d.mu.Lock()
+			d.sel = 0
+			d.mu.Unlock()
+			return
+		}
+	}
+	t.Fatalf("no filter named %q", label)
+}
+
+// TestFilterAppliesToSelectionAndDetail: the band, the selection and the
+// evidence pane must describe the same file. The band used to filter a local
+// copy while the selection indexed the unfiltered list, so with a filter
+// applied the cursor marked one row and the detail pane described another.
+func TestFilterAppliesToSelectionAndDetail(t *testing.T) {
+	d := failureSet(OutcomeMismatch, OutcomeMissing, OutcomeMissing, OutcomeIOError)
+	selectFilter(t, d, "missing sidecar")
+
+	d.mu.Lock()
+	fs := d.visibleFailuresLocked()
+	d.mu.Unlock()
+	if len(fs) != 2 {
+		t.Fatalf("filter kept %d files, want 2", len(fs))
+	}
+
+	// Moving past the end of the filtered list must clamp to it, not to the
+	// length of the unfiltered one.
+	d.focus.Store(focusBand)
+	d.Move(10)
+	d.mu.Lock()
+	sel := d.sel
+	d.mu.Unlock()
+	if sel != 1 {
+		t.Fatalf("selection clamped to %d, want 1 (the filtered list has 2)", sel)
+	}
+
+	// The cursor in the band and the file in the detail pane agree.
+	band := d.bandRows(80)
+	cursor := -1
+	for i, row := range band {
+		if strings.HasPrefix(row, d.c.cyan(cursorMark)) || strings.HasPrefix(row, cursorMark) {
+			cursor = i
+		}
+	}
+	if cursor < 0 {
+		t.Fatalf("no cursor in the band:\n%s", strings.Join(band, "\n"))
+	}
+	wantPath := fs[sel].Path
+	if !strings.Contains(band[cursor], filepath.Base(wantPath)) {
+		t.Errorf("cursor row %q does not name %q", band[cursor], wantPath)
+	}
+	detail := strings.Join(d.leftPane(20, 70, true), "\n")
+	if !strings.Contains(detail, wantPath) {
+		t.Errorf("detail pane does not describe the selected file %q:\n%s", wantPath, detail)
+	}
+}
+
+// TestFilterWithNoMatchesLeavesNoStaleSelection: a category with nothing in it
+// must not leave the detail pane describing a file from the previous one.
+func TestFilterWithNoMatchesLeavesNoStaleSelection(t *testing.T) {
+	d := failureSet(OutcomeMismatch, OutcomeMismatch)
+	selectFilter(t, d, "io errors")
+	if got := len(d.bandRows(80)); got != 1 {
+		t.Fatalf("band has %d rows, want the one saying the category is empty", got)
+	}
+	if detail := strings.Join(d.leftPane(20, 70, true), "\n"); strings.Contains(detail, "/root/f") {
+		t.Errorf("detail pane still describes a filtered-out file:\n%s", detail)
+	}
+}
+
+// TestAbandonDoesNotCount: a file the run was cancelled part-way through
+// produced no verdict, and counting it as finished reported it as verified.
+func TestAbandonDoesNotCount(t *testing.T) {
+	d := fakeDisplay(2)
+	before := d.doneFiles.Load()
+	okBefore := d.nOK.Load()
+	d.Begin(0, "/root/big.bin", 1<<20)
+	// The verdict a cancelled file produces: no token, and the zero Outcome,
+	// which is OutcomeOK. Finish has to refuse it rather than count it.
+	d.Finish(0, Verdict{Path: "/root/big.bin", Size: 1 << 20})
+	if d.doneFiles.Load() != before || d.nOK.Load() != okBefore {
+		t.Errorf("an abandoned file was counted: files %d->%d, ok %d->%d",
+			before, d.doneFiles.Load(), okBefore, d.nOK.Load())
+	}
+	if d.slots[0].active.Load() {
+		t.Error("the worker row was not released")
 	}
 }

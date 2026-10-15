@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -297,5 +300,109 @@ func TestNoVerifyWithoutCreate(t *testing.T) {
 	}
 	if r.stderr != "" {
 		t.Errorf("a no-op should not write to stderr, got %q", r.stderr)
+	}
+}
+
+// TestOversizedSidecarIsNotRead: a sidecar is untrusted input, and its size is
+// as untrusted as its bytes. A digest is 64 characters, so a file far larger
+// than that is not one and must not be pulled into memory to find out.
+func TestOversizedSidecarIsNotRead(t *testing.T) {
+	root := tree{
+		files:    map[string]string{"a.bin": "x"},
+		sidecars: map[string]string{"a.bin": strings.Repeat("a", maxSidecarBytes+1)},
+	}.build(t)
+	r := runCLI(t, root)
+	if got := r.counter(t, "Missing/empty"); got != "1" {
+		t.Errorf("Missing/empty = %s, want 1", got)
+	}
+	if r.code != 2 {
+		t.Errorf("exit = %d, want 2", r.code)
+	}
+	if !strings.Contains(r.stdout, "does not hold a SHA-256 digest") {
+		t.Errorf("an oversized sidecar should read as not a digest:\n%s", r.stdout)
+	}
+}
+
+// TestCreateModeRecordsEvidence: a mismatch found in create mode has the same
+// two digests behind it as one found by a plain verify, and the results view
+// reads them from the verdict.
+func TestCreateModeRecordsEvidence(t *testing.T) {
+	stale := sha256Hex("what it used to be")
+	root := tree{
+		files:    map[string]string{"a.bin": "current"},
+		sidecars: map[string]string{"a.bin": stale},
+	}.build(t)
+
+	f := File{Path: filepath.Join(root, "a.bin"), Size: 7}
+	v := checkFile(context.Background(), f, checkOpts{create: true},
+		make([]byte, 1<<16), nil, nil)
+	if v.Outcome != OutcomeMismatch {
+		t.Fatalf("outcome = %v, want a mismatch", v.Outcome)
+	}
+	if v.Recorded != stale {
+		t.Errorf("Recorded = %q, want the stale digest", v.Recorded)
+	}
+	if v.Computed != sha256Hex("current") {
+		t.Errorf("Computed = %q, want the current digest", v.Computed)
+	}
+}
+
+// TestUnreadableFileRecordsTheError: "file could not be read" reads the same
+// for a permissions problem and a failing disk, so the underlying error is
+// carried for the evidence pane to tell them apart.
+func TestUnreadableFileRecordsTheError(t *testing.T) {
+	root := tree{
+		files: map[string]string{"a.bin": "x"},
+		seed:  []string{"a.bin"},
+		mode:  map[string]os.FileMode{"a.bin": 0o000},
+	}.build(t)
+
+	f := File{Path: filepath.Join(root, "a.bin"), Size: 1}
+	v := checkFile(context.Background(), f, checkOpts{}, make([]byte, 1<<16), nil, nil)
+	if v.Outcome != OutcomeIOError {
+		t.Fatalf("outcome = %v, want an I/O error", v.Outcome)
+	}
+	if v.Err == nil {
+		t.Error("the underlying error was discarded")
+	}
+}
+
+// TestReadSidecarRefusesOversizedFiles: the limit exists so a file that merely
+// happens to be named like a sidecar is never read into memory whole. Both
+// outcomes report "not a digest", so only a direct read shows the difference.
+func TestReadSidecarRefusesOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.sha256")
+	if err := os.WriteFile(big, bytes.Repeat([]byte("a"), maxSidecarBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSidecar(big); !errors.Is(err, errSidecarTooBig) {
+		t.Errorf("err = %v, want errSidecarTooBig", err)
+	}
+
+	ok := filepath.Join(dir, "ok.sha256")
+	if err := os.WriteFile(ok, []byte(sha256Hex("x")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readSidecar(ok); err != nil || got != sha256Hex("x") {
+		t.Errorf("readSidecar(ok) = %q, %v", got, err)
+	}
+}
+
+// TestCreateModeRecordsTheIOError: create mode reaches its own hashing branch,
+// so the cause has to be carried there as well as on the verify path.
+func TestCreateModeRecordsTheIOError(t *testing.T) {
+	root := tree{
+		files: map[string]string{"a.bin": "x"},
+		mode:  map[string]os.FileMode{"a.bin": 0o000},
+	}.build(t)
+	f := File{Path: filepath.Join(root, "a.bin"), Size: 1}
+	v := checkFile(context.Background(), f, checkOpts{create: true},
+		make([]byte, 1<<16), nil, nil)
+	if v.Outcome != OutcomeIOError {
+		t.Fatalf("outcome = %v, want an I/O error", v.Outcome)
+	}
+	if v.Err == nil {
+		t.Error("the underlying error was discarded")
 	}
 }

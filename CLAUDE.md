@@ -46,7 +46,7 @@ serious than a silent no-op.
 Never trust a change that has not been run.
 
 ```bash
-gofmt -l . && go vet ./... && go test ./... && go test -race ./...
+test -z "$(gofmt -l .)" && go vet ./... && go test ./... && go test -race ./...
 ```
 
 `go test` asserts the contract directly:
@@ -268,8 +268,10 @@ the major version (`/v2`); a new major version changes it.
    publishes a GitHub release with them.
 4. Homebrew is updated by hand and is not touched by any workflow. Copy
    `packaging/homebrew/treecheck.rb` to `Formula/treecheck.rb` in
-   `prog893/homebrew-tap` with the new tag, commit, and push. The formula only
-   exists for anyone else once the tap repository has the commit.
+   `prog893/homebrew-tap`, set the tag, and replace
+   `REPLACE_WITH_RELEASE_COMMIT_SHA` with `git rev-parse vX.Y.Z^{commit}`.
+   Commit and push. The formula only exists for anyone else once the tap
+   repository has the commit.
 5. `brew update && brew upgrade treecheck`, then `brew test treecheck` and
    `brew audit --formula prog893/tap/treecheck`. Both must pass clean.
 
@@ -286,6 +288,9 @@ The formula has three non-obvious requirements, all encoded in the template:
   interpolation resolves to a bare `"v"` and the clone fails.
 - **It builds from source** with `depends_on "go" => :build`, so the tap needs
   no binaries of its own.
+- **The revision is pinned** beside the tag, so a tag that is later moved
+  cannot change what gets built. It is the one field that must be filled in at
+  release time; a formula still carrying the placeholder will not clone.
 
 ## Publishing
 

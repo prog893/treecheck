@@ -104,7 +104,6 @@ func runCLI(t *testing.T, argv ...string) result {
 	}
 	outC := make(chan string, 1)
 	errC := make(chan string, 1)
-	go func() { b, _ := os.ReadFile("/dev/stdin"); _ = b }()
 	go func() { outC <- readAll(outR) }()
 	go func() { errC <- readAll(errR) }()
 

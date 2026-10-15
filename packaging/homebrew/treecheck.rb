@@ -10,7 +10,14 @@ class Treecheck < Formula
   # "v#{version}", since style autocorrect sorts `url` above `version`, at which
   # point the interpolation resolves to a bare "v" and the clone fails with
   # "Remote branch v not found in upstream origin".
-  url "https://github.com/prog893/treecheck.git", tag: "v2.0.0"
+  #
+  # The revision pins the exact commit the tag pointed at when the release was
+  # published, so a tag that is later moved cannot change what gets built. It
+  # is filled in at release time: replace REPLACE_WITH_RELEASE_COMMIT_SHA with
+  # the output of `git rev-parse vX.Y.Z^{commit}` for the tag being released.
+  url "https://github.com/prog893/treecheck.git",
+      tag:      "v2.0.0",
+      revision: "REPLACE_WITH_RELEASE_COMMIT_SHA"
   license "MIT"
 
   head "https://github.com/prog893/treecheck.git", branch: "main"

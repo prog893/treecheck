@@ -108,10 +108,14 @@ func walkTree(root string, maxDepth int, exclude []string, hashExt string) walkR
 		if strings.HasSuffix(name, hashExt) {
 			return nil
 		}
-		info, ierr := d.Info()
+		// A failed Info leaves the file in the walk with no weight at all,
+		// which skews the percentage and the estimate. The stat is worth one
+		// retry before accepting that.
 		var size int64
-		if ierr == nil {
+		if info, ierr := d.Info(); ierr == nil {
 			size = info.Size()
+		} else {
+			size = statSize(p)
 		}
 		res.Files = append(res.Files, File{Path: p, Rel: rel, Size: size})
 		res.Bytes += size

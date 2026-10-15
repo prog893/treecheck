@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -51,8 +50,12 @@ func gather(f Failure) forensics {
 	if fi, err := os.Lstat(side); err == nil {
 		fo.sideOK = true
 		fo.sideSize, fo.sideMod = fi.Size(), fi.ModTime()
-		if b, rerr := os.ReadFile(side); rerr == nil {
-			fo.sideBody = strings.TrimSpace(string(b))
+		// Bounded like every other read of a sidecar. The size is already
+		// known here, so an oversized one is simply not read.
+		if fi.Size() > maxSidecarBytes {
+			fo.sideErr = errSidecarTooBig
+		} else if body, rerr := readSidecar(side); rerr == nil {
+			fo.sideBody = body
 		} else {
 			fo.sideErr = rerr
 		}
@@ -206,7 +209,8 @@ func readKeys(d *Display) {
 	defer tty.Close()
 
 	fd := int(tty.Fd())
-	buf := make([]byte, 8)
+	buf := make([]byte, 64)
+	var pending []byte
 	for {
 		n, err := syscall.Read(fd, buf)
 		if err == syscall.EINTR {
@@ -215,25 +219,29 @@ func readKeys(d *Display) {
 		if err != nil || n <= 0 {
 			return
 		}
-		switch decodeKey(buf[:n]) {
-		case keyQuit:
-			return
-		case keyUp:
-			d.Scroll(-1)
-		case keyDown:
-			d.Scroll(1)
-		case keyPageUp:
-			d.Scroll(-d.pageSize())
-		case keyPageDown:
-			d.Scroll(d.pageSize())
-		case keyHome:
-			d.ScrollHome()
-		case keyEnd:
-			d.ScrollEnd()
-		case keyBand:
-			d.ToggleExpanded()
-		case keyFocus:
-			d.CycleFocus()
+		var keys []key
+		keys, pending = decodeKeys(append(pending, buf[:n]...))
+		for _, k := range keys {
+			switch k {
+			case keyQuit:
+				return
+			case keyUp:
+				d.Scroll(-1)
+			case keyDown:
+				d.Scroll(1)
+			case keyPageUp:
+				d.Scroll(-d.pageSize())
+			case keyPageDown:
+				d.Scroll(d.pageSize())
+			case keyHome:
+				d.ScrollHome()
+			case keyEnd:
+				d.ScrollEnd()
+			case keyBand:
+				d.ToggleExpanded()
+			case keyFocus:
+				d.CycleFocus()
+			}
 		}
 	}
 }
@@ -254,48 +262,107 @@ const (
 	keyFocus
 )
 
-// decodeKey handles the arrow keys, which arrive as escape sequences rather
-// than single bytes, alongside the vi-style and plain letters.
+// decodeKeys consumes every complete key in buf and returns what is left: an
+// escape sequence cut short by the read boundary, which the next read
+// completes.
+//
+// A terminal delivers bytes, not keys. Holding an arrow key puts several
+// sequences in one read, and decoding only the first dropped the rest; a read
+// that ends mid-sequence used to lose it entirely.
+func decodeKeys(buf []byte) (keys []key, rest []byte) {
+	for len(buf) > 0 {
+		k, used := decodeOne(buf)
+		if used == 0 {
+			// Incomplete: keep it for the next read. A sequence that never
+			// completes would otherwise stall every later key, so an
+			// implausibly long one is discarded instead.
+			if len(buf) > maxPendingKeyBytes {
+				return keys, nil
+			}
+			return keys, buf
+		}
+		if k != keyNone {
+			keys = append(keys, k)
+		}
+		buf = buf[used:]
+	}
+	return keys, nil
+}
+
+// maxPendingKeyBytes bounds a partial escape sequence. The longest this
+// decoder recognises is four bytes.
+const maxPendingKeyBytes = 16
+
+// decodeOne decodes the key at the front of buf and reports how many bytes it
+// consumed. Zero means the buffer ends mid-sequence.
+func decodeOne(buf []byte) (key, int) {
+	if buf[0] != 0x1b {
+		return decodeByte(buf[0]), 1
+	}
+	if len(buf) < 2 {
+		return keyNone, 0
+	}
+	if buf[1] != '[' {
+		// Alt-modified key, or an escape this decoder has no use for.
+		return keyNone, 2
+	}
+	if len(buf) < 3 {
+		return keyNone, 0
+	}
+	switch buf[2] {
+	case 'A':
+		return keyUp, 3
+	case 'B':
+		return keyDown, 3
+	case 'H':
+		return keyHome, 3
+	case 'F':
+		return keyEnd, 3
+	case '5', '6':
+		// Page keys carry a trailing tilde, which has to be consumed with
+		// them or it decodes as a key of its own.
+		if len(buf) < 4 {
+			return keyNone, 0
+		}
+		if buf[2] == '5' {
+			return keyPageUp, 4
+		}
+		return keyPageDown, 4
+	}
+	return keyNone, 3
+}
+
+func decodeByte(b byte) key {
+	switch b {
+	case 'k':
+		return keyUp
+	case 'j':
+		return keyDown
+	case 'g':
+		return keyHome
+	case 'G':
+		return keyEnd
+	case 'p', 'P':
+		return keyPause
+	case ' ':
+		return keyBand
+	case '\t':
+		return keyFocus
+	case 'q', 'Q', 3, 4:
+		return keyQuit
+	}
+	return keyNone
+}
+
+// decodeKey is decodeKeys for a buffer known to hold one key, and reports
+// keyNone for anything incomplete.
 //
 // A bare ESC is deliberately not quit: it is the first byte of every arrow
 // key, and a short read would otherwise end the session on an arrow press.
 func decodeKey(b []byte) key {
-	if len(b) >= 3 && b[0] == 0x1b && b[1] == '[' {
-		switch b[2] {
-		case 'A':
-			return keyUp
-		case 'B':
-			return keyDown
-		case '5':
-			return keyPageUp
-		case '6':
-			return keyPageDown
-		case 'H':
-			return keyHome
-		case 'F':
-			return keyEnd
-		}
+	keys, _ := decodeKeys(b)
+	if len(keys) == 0 {
 		return keyNone
 	}
-	if len(b) == 1 {
-		switch b[0] {
-		case 'k':
-			return keyUp
-		case 'j':
-			return keyDown
-		case 'g':
-			return keyHome
-		case 'G':
-			return keyEnd
-		case 'p', 'P':
-			return keyPause
-		case ' ':
-			return keyBand
-		case '\t':
-			return keyFocus
-		case 'q', 'Q', 3, 4:
-			return keyQuit
-		}
-	}
-	return keyNone
+	return keys[0]
 }

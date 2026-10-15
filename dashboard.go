@@ -520,6 +520,7 @@ func (d *Display) summaryText() string {
 	d.mu.Lock()
 	res := d.res
 	sel := d.sel
+	visible := len(d.visibleFailuresLocked())
 	d.mu.Unlock()
 	n := res.counts
 	if n == nil {
@@ -536,8 +537,12 @@ func (d *Display) summaryText() string {
 		left += " · " + d.c.yellow(itoa(n.Unreached)+" not reached")
 	}
 	left += " · " + fmtDur(res.elapsed)
-	if total := len(n.Failures); total > 0 {
-		left += fmt.Sprintf(" · %d/%d", sel+1, total)
+	// Counted against the list on screen, which the filter may have narrowed.
+	if visible > 0 {
+		if sel >= visible {
+			sel = visible - 1
+		}
+		left += fmt.Sprintf(" · %d/%d", sel+1, visible)
 	}
 	return left
 }
@@ -614,26 +619,18 @@ func (d *Display) bandRows(w int) []string {
 		}
 		return rows
 	}
-	d.mu.Lock()
-	res, sel := d.res, d.sel
-	d.mu.Unlock()
-	if res.counts == nil || len(res.counts.Failures) == 0 {
-		return nil
-	}
 	// Limited to the selected counter, so picking "mismatched" narrows the
 	// list to the files that matter rather than only recolouring a number.
-	fs := res.counts.Failures
-	if match, filtered := d.filter(); filtered {
-		kept := make([]Failure, 0, len(fs))
-		for _, f := range fs {
-			if match(f.Outcome) {
-				kept = append(kept, f)
-			}
-		}
-		fs = kept
-		if sel >= len(fs) {
-			sel = len(fs) - 1
-		}
+	// The same list the selection indexes and the detail pane reads.
+	d.mu.Lock()
+	res, sel := d.res, d.sel
+	fs := d.visibleFailuresLocked()
+	d.mu.Unlock()
+	if sel >= len(fs) {
+		sel = len(fs) - 1
+	}
+	if sel < 0 {
+		sel = 0
 	}
 	if len(fs) == 0 {
 		return []string{" " + d.c.dim("no files in this category")}
@@ -680,23 +677,26 @@ func (d *Display) leftPane(h, w int, done bool) []string {
 		return d.recentLines(h)
 	}
 	d.mu.Lock()
-	res, sel := d.res, d.sel
+	fs := d.visibleFailuresLocked()
+	sel := d.sel
 	d.mu.Unlock()
 	// With nothing to inspect the pane stays the log it was. The verdict is
-	// in the header, not written over the log's first lines.
-	if res.counts == nil || len(res.counts.Failures) == 0 {
+	// in the header, not written over the log's first lines. A filter that
+	// matches nothing leaves it the log as well, with the band saying so.
+	if len(fs) == 0 {
 		return d.recentLines(h)
 	}
-	return d.detailPane(h, w, res, sel)
+	if sel >= len(fs) {
+		sel = len(fs) - 1
+	}
+	if sel < 0 {
+		sel = 0
+	}
+	return d.detailPane(h, w, fs[sel])
 }
 
-func (d *Display) detailPane(h, w int, res results, sel int) []string {
-	fs := res.counts.Failures
-	if sel < 0 || sel >= len(fs) {
-		return nil
-	}
-	f := fs[sel]
-	fo := d.forensicsFor(sel, f)
+func (d *Display) detailPane(h, w int, f Failure) []string {
+	fo := d.forensicsFor(f)
 
 	var out []string
 	add := func(format string, args ...any) {
@@ -733,12 +733,14 @@ func (d *Display) detailPane(h, w int, res results, sel int) []string {
 	return out
 }
 
-func (d *Display) forensicsFor(i int, f Failure) forensics {
+// forensicsFor caches per file, not per row: with a filter applied, the file
+// at a given row changes.
+func (d *Display) forensicsFor(f Failure) forensics {
 	d.mu.Lock()
 	if d.forensics == nil {
-		d.forensics = map[int]forensics{}
+		d.forensics = map[string]forensics{}
 	}
-	if fo, ok := d.forensics[i]; ok {
+	if fo, ok := d.forensics[f.Path]; ok {
 		d.mu.Unlock()
 		return fo
 	}
@@ -746,7 +748,7 @@ func (d *Display) forensicsFor(i int, f Failure) forensics {
 
 	fo := gather(f)
 	d.mu.Lock()
-	d.forensics[i] = fo
+	d.forensics[f.Path] = fo
 	d.mu.Unlock()
 	return fo
 }

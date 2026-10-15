@@ -13,7 +13,10 @@ import (
 
 const hashExt = ".sha256"
 
-var errInterrupted = errors.New("interrupted")
+var (
+	errInterrupted   = errors.New("interrupted")
+	errSidecarTooBig = errors.New("sidecar is larger than a digest could be")
+)
 
 // isSHA256 decides whether a sidecar holds a digest.
 //
@@ -35,10 +38,26 @@ func isSHA256(s string) bool {
 	return true
 }
 
+// maxSidecarBytes bounds what is read from a sidecar. A SHA-256 digest is 64
+// characters, so anything beyond a line or two of surrounding whitespace is
+// not one, and a file that happens to be named like a sidecar should not be
+// pulled into memory whole to find that out.
+const maxSidecarBytes = 4096
+
 func readSidecar(p string) (string, error) {
-	b, err := os.ReadFile(p)
+	f, err := os.Open(p)
 	if err != nil {
 		return "", err
+	}
+	defer f.Close()
+	// One byte past the limit, so an oversized file is detected rather than
+	// silently truncated into something that might parse.
+	b, err := io.ReadAll(io.LimitReader(f, maxSidecarBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > maxSidecarBytes {
+		return "", errSidecarTooBig
 	}
 	return strings.TrimSpace(string(b)), nil
 }
@@ -111,13 +130,17 @@ func checkFile(ctx context.Context, f File, opts checkOpts, buf []byte, prog pro
 
 	stored, err := readSidecar(sidecar)
 	if err != nil {
-		if os.IsNotExist(err) {
+		switch {
+		case os.IsNotExist(err):
 			v.Token, v.Outcome = TokenMissing, OutcomeMissing
-			return v
+		case errors.Is(err, errSidecarTooBig):
+			v.Token, v.Outcome = TokenMissing, OutcomeMissing
+			v.Detail = []string{"sidecar does not hold a SHA-256 digest"}
+		default:
+			v.Token, v.Outcome = TokenIOError, OutcomeIOError
+			v.Detail = []string{"sidecar could not be read"}
+			v.Err = err
 		}
-		v.Token, v.Outcome = TokenIOError, OutcomeIOError
-		v.Detail = []string{"sidecar could not be read"}
-		v.Err = err
 		return v
 	}
 	if stored == "" {
@@ -174,6 +197,7 @@ func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf
 					}
 					v.Token, v.Outcome = TokenIOError, OutcomeIOError
 					v.Detail = []string{"file could not be read"}
+					v.Err = herr
 					return v
 				}
 				if strings.EqualFold(stored, current) {
@@ -182,11 +206,17 @@ func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf
 				}
 				v.Token, v.Outcome = TokenMismatch, OutcomeMismatch
 				v.Detail = []string{"recorded " + stored, "now      " + current}
+				v.Recorded, v.Computed = stored, current
 				return v
 			}
+		} else if errors.Is(err, errSidecarTooBig) {
+			v.Token, v.Outcome = TokenMissing, OutcomeMissing
+			v.Detail = []string{"sidecar does not hold a SHA-256 digest"}
+			return v
 		} else if !os.IsNotExist(err) {
 			v.Token, v.Outcome = TokenIOError, OutcomeIOError
 			v.Detail = []string{"sidecar could not be read"}
+			v.Err = err
 			return v
 		}
 	}
@@ -200,11 +230,13 @@ func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf
 		}
 		v.Token, v.Outcome = TokenIOError, OutcomeIOError
 		v.Detail = []string{"file could not be read"}
+		v.Err = err
 		return v
 	}
 	if err := os.WriteFile(sidecar, []byte(current+"\n"), 0o644); err != nil {
 		v.Token, v.Outcome = TokenIOError, OutcomeIOError
 		v.Detail = []string{"sidecar could not be written"}
+		v.Err = err
 		return v
 	}
 	v.Created = true
@@ -227,6 +259,7 @@ func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf
 	if err != nil {
 		v.Token, v.Outcome = TokenIOError, OutcomeIOError
 		v.Detail = []string{"sidecar written but could not be read back"}
+		v.Err = err
 		return v
 	}
 	if !isSHA256(back) {
@@ -240,6 +273,7 @@ func createPath(ctx context.Context, f File, sidecar string, opts checkOpts, buf
 			fmt.Sprintf("sidecar read back as %s", back),
 			fmt.Sprintf("expected             %s", current),
 		}
+		v.Recorded, v.Computed = back, current
 		return v
 	}
 	v.Token, v.Outcome = TokenCreated, OutcomeOK

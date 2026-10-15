@@ -76,6 +76,9 @@ func TestDisplayConcurrency(t *testing.T) {
 				_ = d.frame()
 				_ = d.renderDashboard(30, 100)
 				_ = d.recentLines(10)
+				// The frame loop and the key handlers all reach repaint, and
+				// they share the screen's cached frame.
+				d.repaint()
 			}
 		}()
 	}

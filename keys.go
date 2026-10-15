@@ -87,7 +87,8 @@ func watchKeys(ctx context.Context, d *Display, quit func(), done chan<- struct{
 	}
 	defer restore()
 
-	buf := make([]byte, 8)
+	buf := make([]byte, 64)
+	var pending []byte
 	fd := int(tty.Fd())
 	for {
 		select {
@@ -114,31 +115,44 @@ func watchKeys(ctx context.Context, d *Display, quit func(), done chan<- struct{
 		if n == 0 {
 			continue
 		}
-		switch decodeKey(buf[:n]) {
-		case keyQuit:
-			// Quit means quit, at any point. Stopping a scan to look at its
-			// partial results is what letting it finish is for; a key labelled
-			// quit that instead moves to another screen is not one.
-			quit()
-			return
-		case keyPause:
-			d.TogglePause()
-		case keyBand:
-			d.ToggleExpanded()
-		case keyFocus:
-			d.CycleFocus()
-		case keyUp:
-			d.Scroll(-1)
-		case keyDown:
-			d.Scroll(1)
-		case keyPageUp:
-			d.Scroll(-d.pageSize())
-		case keyPageDown:
-			d.Scroll(d.pageSize())
-		case keyHome:
-			d.ScrollHome()
-		case keyEnd:
-			d.ScrollEnd()
+		var keys []key
+		keys, pending = decodeKeys(append(pending, buf[:n]...))
+		for _, k := range keys {
+			if watchKey(d, k, quit) {
+				return
+			}
 		}
 	}
+}
+
+// watchKey applies one key during a scan, and reports whether the watcher
+// should stop.
+func watchKey(d *Display, k key, quit func()) bool {
+	switch k {
+	case keyQuit:
+		// Quit means quit, at any point. Stopping a scan to look at its
+		// partial results is what letting it finish is for; a key labelled
+		// quit that instead moves to another screen is not one.
+		quit()
+		return true
+	case keyPause:
+		d.TogglePause()
+	case keyBand:
+		d.ToggleExpanded()
+	case keyFocus:
+		d.CycleFocus()
+	case keyUp:
+		d.Scroll(-1)
+	case keyDown:
+		d.Scroll(1)
+	case keyPageUp:
+		d.Scroll(-d.pageSize())
+	case keyPageDown:
+		d.Scroll(d.pageSize())
+	case keyHome:
+		d.ScrollHome()
+	case keyEnd:
+		d.ScrollEnd()
+	}
+	return false
 }

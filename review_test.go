@@ -206,3 +206,47 @@ func countOutcome(fs []Failure, o Outcome) int {
 	}
 	return n
 }
+
+// TestDecodeKeysStream: a terminal delivers bytes, not keys. Holding an arrow
+// key puts several sequences in one read, and a read can end mid-sequence.
+func TestDecodeKeysStream(t *testing.T) {
+	// Several keys in one read, all of them delivered.
+	keys, rest := decodeKeys([]byte("\x1b[B\x1b[Bjq"))
+	want := []key{keyDown, keyDown, keyDown, keyQuit}
+	if len(rest) != 0 {
+		t.Errorf("leftover bytes %q", rest)
+	}
+	if len(keys) != len(want) {
+		t.Fatalf("got %v, want %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("got %v, want %v", keys, want)
+		}
+	}
+
+	// A sequence split across two reads survives the boundary.
+	keys, rest = decodeKeys([]byte("j\x1b["))
+	if len(keys) != 1 || keys[0] != keyDown {
+		t.Fatalf("first half: got %v", keys)
+	}
+	if string(rest) != "\x1b[" {
+		t.Fatalf("incomplete sequence not carried: %q", rest)
+	}
+	keys, rest = decodeKeys(append(rest, 'A'))
+	if len(keys) != 1 || keys[0] != keyUp || len(rest) != 0 {
+		t.Fatalf("second half: got %v rest %q", keys, rest)
+	}
+
+	// The tilde of a page key is consumed with it, not left to decode alone.
+	keys, rest = decodeKeys([]byte("\x1b[5~\x1b[6~"))
+	if len(keys) != 2 || keys[0] != keyPageUp || keys[1] != keyPageDown || len(rest) != 0 {
+		t.Fatalf("page keys: got %v rest %q", keys, rest)
+	}
+
+	// A sequence that never completes cannot stall every later key.
+	_, rest = decodeKeys([]byte("\x1b[" + strings.Repeat("\x1b", maxPendingKeyBytes)))
+	if len(rest) > maxPendingKeyBytes {
+		t.Errorf("pending bytes grew without bound: %d", len(rest))
+	}
+}

@@ -83,8 +83,11 @@ jobs:
           name: treecheck-${{ steps.version.outputs.version }}
           path: dist/
 
+      # A manual run can be started against a tag ref, so the event matters as
+      # well as the ref type: without it, exercising the pipeline by hand would
+      # publish a release.
       - name: publish release (tags only)
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
