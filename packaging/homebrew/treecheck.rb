@@ -1,7 +1,3 @@
-# Template for Formula/treecheck.rb in prog893/homebrew-tap, for the Go
-# implementation (2.x). It is not used by any build in this repository: the tap
-# is its own repository and is updated by hand at release time. Copy this file
-# there, with the tag set to the release being published.
 class Treecheck < Formula
   desc "Verify files against SHA-256 sidecars to catch silent corruption"
   homepage "https://github.com/prog893/treecheck"
@@ -11,19 +7,14 @@ class Treecheck < Formula
   # point the interpolation resolves to a bare "v" and the clone fails with
   # "Remote branch v not found in upstream origin".
   #
-  # The revision pins the exact commit the tag pointed at when the release was
-  # published, so a tag that is later moved cannot change what gets built. It
-  # is filled in at release time: replace REPLACE_WITH_RELEASE_COMMIT_SHA with
-  # the output of `git rev-parse vX.Y.Z^{commit}` for the tag being released.
+  # Pin the release commit so moving the tag cannot change the source.
   url "https://github.com/prog893/treecheck.git",
       tag:      "v2.0.0",
-      revision: "REPLACE_WITH_RELEASE_COMMIT_SHA"
+      revision: "0c04fdb944a1655277dcd6ab6c8a3d839d1fd7c2"
   license "MIT"
 
   head "https://github.com/prog893/treecheck.git", branch: "main"
 
-  # Built from source: the Go standard library covers everything, so the only
-  # dependency is the compiler, and only at build time.
   depends_on "go" => :build
 
   def install
