@@ -1,2 +1,11 @@
 .DS_Store
+
+# Sidecars this tool creates, so a run inside the repo leaves nothing to commit.
 *.sha256
+
+# Build and test artifacts.
+/treecheck
+/dist/
+*.test
+*.out
+coverage.*

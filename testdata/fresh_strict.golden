@@ -1,0 +1,15 @@
+exit: 1
+--- stdout ---
+Mode: Verify only | Dir: ROOT | Depth: unlimited
+
+missing  ROOT/a/f2.bin
+missing  ROOT/f1.bin
+
+Scanned:         2 files
+Verified:        0
+Mismatched:      0
+Missing/empty:   2
+I/O errors:      0
+Elapsed:         X
+--- stderr ---
+ERROR: Completed with errors

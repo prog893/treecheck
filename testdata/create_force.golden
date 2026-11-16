@@ -1,0 +1,25 @@
+exit: 1
+--- stdout ---
+Mode: Create + Verify | Dir: ROOT | Depth: unlimited
+Workers: 4 (parallel hashing)
+
+Hashing with 4 parallel workers...
+created  ROOT/bad.bin
+created  ROOT/emptysc.bin
+created  ROOT/good.bin
+created  ROOT/junksc.bin
+io-error ROOT/noperm.bin
+         file could not be read
+created  ROOT/nosidecar.bin
+created  ROOT/sub/nested.bin
+
+Scanned:         7 files
+Verified:        6
+Created:         6
+Mismatched:      0
+Missing/empty:   0
+I/O errors:      1
+  ROOT/noperm.bin
+Elapsed:         X
+--- stderr ---
+ERROR: Completed with errors

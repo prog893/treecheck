@@ -1,0 +1,4 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+ERROR: -j needs a positive integer, got: 0

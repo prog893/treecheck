@@ -1,0 +1,82 @@
+name: go
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Both, deliberately. The tool's whole job is filesystem behavior, and the
+    # two platforms disagree about enough of it (permission semantics, what a
+    # filesystem accepts in a name, how an unreadable directory surfaces, even
+    # the names of the terminal ioctls) that passing on one says little about
+    # the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          # No third-party dependencies, so there is no go.sum to key a cache on.
+          cache: false
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:" >&2
+            echo "$unformatted" >&2
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test -count=1 ./...
+
+      # Separate from the plain run: the race detector is the only thing that
+      # exercises the display's sharing, and it is slow enough that it should
+      # not hide a plain compile or logic failure behind its runtime.
+      - name: test -race
+        run: go test -race -count=1 ./...
+
+  # Every platform a release ships for has to build, not only the two the tests
+  # run on. The terminal code names its ioctls per platform, and a missing name
+  # fails the build rather than the run.
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: build every release target
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            echo "building $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null .
+          done
